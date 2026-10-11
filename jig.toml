@@ -59,6 +59,9 @@ enabled = false
 # "directory": file tools confined to a folder; no code execution or browser.
 # "container": code, shell and the headless browser run in a hardened Docker container
 # (build the image first with `jig sandbox build`). Jig refuses to start if Docker is unavailable.
+# "compose": long-running sandbox services on an internal-only network (see docs/container.md).
+# "daytona": code, shell and the browser run against a self-hosted Daytona instance; set
+# daytona_api_base_url (or DAYTONA_API_URL) and daytona_api_key (or DAYTONA_API_KEY).
 [sandbox]
 backend = "directory"
 

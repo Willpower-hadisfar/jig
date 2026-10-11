@@ -218,6 +218,25 @@ Every decision is audited as `egress.allow` or `egress.block`.
 
 **Autostart.** The host autostart (Task Scheduler, launchd or systemd) is not used in container mode; see [Always on](#always-on).
 
+## Daytona sandbox backend
+
+`[sandbox] backend = "daytona"` runs code, shell commands and the browser in sandboxes on a **self-hosted
+Daytona** instance instead of local Docker. Nothing is deployed by this setting; Jig only talks to the API
+you point it at:
+
+```toml
+[sandbox]
+backend = "daytona"
+daytona_api_base_url = "http://daytona.lan:3000"  # required, no default: your instance decides
+# daytona_api_key = "..."                          # or DAYTONA_API_URL / DAYTONA_API_KEY in the environment
+```
+
+Jig creates one sandbox per agent workspace (`jig-sbx-<key>`), syncs the workspace into `/workspace` around
+each command, and removes the sandbox when the session ends. If the base URL is missing, malformed or the
+instance does not answer, Jig refuses to start instead of falling back to Docker. The Daytona API is less
+capable than Docker in ways Jig cannot paper over - gated egress, Docker-style resource caps, persistence,
+and a hard 10-minute execution limit are spelled out in `jig/sandbox_daytona/policy.py`.
+
 ## Vault key
 
 In a container there is no Windows DPAPI and no OS keyring, so `deploy/jig.toml` selects the explicit `keyfile` backend:

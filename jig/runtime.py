@@ -259,19 +259,30 @@ class Jig:
                            searxng=self.searxng, attachments=self.attachments, session_id=ctx.session_id)
 
     def _container_backend(self) -> Any:
-        """With ``[sandbox] backend = "container"`` (per-agent Docker) or ``"compose"`` (sandbox services next
-        to a containerised Jig), build the backend and register its tools."""
-        if self.config.sandbox.backend not in ("container", "compose"):
+        """With ``[sandbox] backend = "container"`` (per-agent Docker), ``"compose"`` (sandbox services next
+        to a containerised Jig) or ``"daytona"`` (a self-hosted Daytona instance), build the backend and
+        register its tools."""
+        backend = self.config.sandbox.backend
+        if backend not in ("container", "compose", "daytona"):
             return None
-        from .sandbox_container import ContainerSandbox, EgressProxy
         from .tools.browser import register_browser_tools
         from .tools.sandbox_exec import register_exec_tools
+
+        if backend == "daytona":
+            # No Docker and no local egress proxy: the Daytona API runs the commands and the instance
+            # owns their network (see jig/sandbox_daytona/policy.py).
+            from .sandbox_daytona import DaytonaSandbox
+
+            register_exec_tools(self.registry)
+            register_browser_tools(self.registry)
+            return DaytonaSandbox(self.config.sandbox, self.sandbox.root, self.config.runtime.agent_id)
+        from .sandbox_container import ContainerSandbox, EgressProxy
 
         egress = EgressProxy(bind=self.config.sandbox.egress_bind, ports=self.config.sandbox.egress_ports,
                              rules=self.rules, audit=self.audit)
         register_exec_tools(self.registry)
         register_browser_tools(self.registry)
-        if self.config.sandbox.backend == "compose":
+        if backend == "compose":
             from .sandbox_compose import ComposeSandbox
 
             return ComposeSandbox(self.config.sandbox, self.sandbox.root, egress)

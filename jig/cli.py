@@ -226,9 +226,10 @@ def _sandbox(args: argparse.Namespace) -> int:
     if args.action == "status":
         from .code_execution import BROWSER_TOOLS, CODE_TOOLS, code_execution_status
 
-        # The container and compose backends register these tools when Jig starts (and refuse to start without
-        # Docker); the directory backend registers none.
-        names = set(CODE_TOOLS + BROWSER_TOOLS) if config.sandbox.backend in ("container", "compose") else set()
+        # The container, compose and daytona backends register these tools when Jig starts (the first two
+        # refuse to start without Docker); the directory backend registers none.
+        names = set(CODE_TOOLS + BROWSER_TOOLS) if config.sandbox.backend in ("container", "compose",
+                                                                              "daytona") else set()
         status = code_execution_status(config, names)
         if args.json:
             print(json.dumps(status, indent=2))
