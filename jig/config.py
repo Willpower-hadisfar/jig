@@ -153,6 +153,8 @@ class VisionConfig:
 class SandboxConfig:
     # "directory": file tools are confined to a folder (no code execution, no browser).
     # "container": code, shell and the headless browser run in a hardened per-agent Docker container.
+    # "compose": long-running sandbox services on an internal-only network (see docs/container.md).
+    # "daytona": code, shell and browser run against a self-hosted Daytona instance.
     backend: str = "directory"
     image: str = "jig-sandbox:0.1.0"
     cpus: float = 2.0
@@ -169,6 +171,8 @@ class SandboxConfig:
     exec_service: str = "sandbox-exec:7010"
     browser_service: str = "sandbox-browser:7011"
     egress_port: int = 3128
+    # "daytona": API base URL for self-hosted Daytona instance
+    daytona_api_base_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -626,6 +630,6 @@ def _sandbox_config(values: dict[str, Any], backend_override: str | None) -> San
     if backend := backend_override or os.environ.get("JIG_SANDBOX_BACKEND"):
         values["backend"] = backend
     cfg = _build(SandboxConfig, values, "sandbox")
-    if cfg.backend not in ("directory", "container", "compose"):
-        raise ConfigError(f"[sandbox] backend must be 'directory', 'container' or 'compose', not {cfg.backend!r}")
+    if cfg.backend not in ("directory", "container", "compose", "daytona"):
+        raise ConfigError(f"[sandbox] backend must be 'directory', 'container', 'compose' or 'daytona', not {cfg.backend!r}")
     return cfg
