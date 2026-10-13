@@ -153,6 +153,8 @@ class VisionConfig:
 class SandboxConfig:
     # "directory": file tools are confined to a folder (no code execution, no browser).
     # "container": code, shell and the headless browser run in a hardened per-agent Docker container.
+    # "compose": long-running sandbox services on an internal-only network (see docs/container.md).
+    # "daytona": code, shell and browser run against a self-hosted Daytona instance.
     backend: str = "directory"
     image: str = "jig-sandbox:0.1.0"
     cpus: float = 2.0
@@ -169,6 +171,14 @@ class SandboxConfig:
     exec_service: str = "sandbox-exec:7010"
     browser_service: str = "sandbox-browser:7011"
     egress_port: int = 3128
+    # "daytona": base URL of the self-hosted Daytona control-plane API (no default: it is your instance).
+    # Environment override: DAYTONA_API_URL.
+    daytona_api_base_url: str = ""
+    # "daytona": API key for that instance. Environment override: DAYTONA_API_KEY.
+    daytona_api_key: str = ""
+    # "daytona": image the sandbox is created from (a registry image the Daytona instance can pull);
+    # empty means the [sandbox] image above.
+    daytona_image: str = ""
 
 
 @dataclass(frozen=True)
@@ -625,7 +635,22 @@ def _sandbox_config(values: dict[str, Any], backend_override: str | None) -> San
     values = dict(values)
     if backend := backend_override or os.environ.get("JIG_SANDBOX_BACKEND"):
         values["backend"] = backend
+    if v := os.environ.get("DAYTONA_API_URL"):
+        values["daytona_api_base_url"] = v
+    if v := os.environ.get("DAYTONA_API_KEY"):
+        values["daytona_api_key"] = v
     cfg = _build(SandboxConfig, values, "sandbox")
-    if cfg.backend not in ("directory", "container", "compose"):
-        raise ConfigError(f"[sandbox] backend must be 'directory', 'container' or 'compose', not {cfg.backend!r}")
+    if cfg.backend not in ("directory", "container", "compose", "daytona"):
+        raise ConfigError(f"[sandbox] backend must be 'directory', 'container', 'compose' or 'daytona', not {cfg.backend!r}")
+    if cfg.backend == "daytona":
+        if not cfg.daytona_api_base_url.strip():
+            raise ConfigError("[sandbox] backend = 'daytona' needs daytona_api_base_url (or DAYTONA_API_URL), the "
+                              "base URL of your self-hosted Daytona API; Jig does not default to any host")
+        parts = urlsplit(cfg.daytona_api_base_url.strip())
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ConfigError(f"[sandbox] daytona_api_base_url must be an http(s) URL, not "
+                              f"{cfg.daytona_api_base_url!r} (e.g. http://daytona.lan:3000)")
+        if not cfg.daytona_api_key.strip():
+            raise ConfigError("[sandbox] backend = 'daytona' needs daytona_api_key (or DAYTONA_API_KEY), the API "
+                              "key of your self-hosted Daytona instance")
     return cfg
