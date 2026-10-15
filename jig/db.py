@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -167,6 +167,99 @@ CREATE TABLE IF NOT EXISTS notes (
     created_at TEXT NOT NULL
 );
 
+-- Keyed long-term state (jig.facts): author preferences, book-world state and project continuity, keyed by
+-- scope instead of flat. The `memories` table above stays the user-facing store and is not repurposed.
+-- UNIQUE(scope, subject, content) deduplicates exact repeats, which memories deliberately does not do.
+CREATE TABLE IF NOT EXISTS facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL DEFAULT 'author',
+    subject TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'preference',
+    content TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    supersedes INTEGER REFERENCES facts(id),
+    source TEXT,
+    source_run_id TEXT,
+    source_task_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(scope, subject, content)
+);
+CREATE INDEX IF NOT EXISTS facts_scope ON facts(scope, status, id);
+CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
+    content, subject, content='facts', content_rowid='id', tokenize='porter unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
+    INSERT INTO facts_fts(rowid, content, subject) VALUES (new.id, new.content, new.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
+    INSERT INTO facts_fts(facts_fts, rowid, content, subject)
+    VALUES ('delete', old.id, old.content, old.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
+    INSERT INTO facts_fts(facts_fts, rowid, content, subject)
+    VALUES ('delete', old.id, old.content, old.subject);
+    INSERT INTO facts_fts(rowid, content, subject) VALUES (new.id, new.content, new.subject);
+END;
+
+-- The skill bank (jig.skills): agent-authored procedures. A candidate is never injected into a prompt; a
+-- candidate becomes active only through an explicit human action (jig.skills and the PATCH /skills route).
+CREATE TABLE IF NOT EXISTS skills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    body TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'author',
+    status TEXT NOT NULL DEFAULT 'candidate',
+    source TEXT,
+    source_run_id TEXT,
+    source_task_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    promoted_at TEXT
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(
+    name, title, summary, body, content='skills', content_rowid='id', tokenize='porter unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS skills_ai AFTER INSERT ON skills BEGIN
+    INSERT INTO skills_fts(rowid, name, title, summary, body) VALUES (new.id, new.name, new.title, new.summary, new.body);
+END;
+CREATE TRIGGER IF NOT EXISTS skills_ad AFTER DELETE ON skills BEGIN
+    INSERT INTO skills_fts(skills_fts, rowid, name, title, summary, body)
+    VALUES ('delete', old.id, old.name, old.title, old.summary, old.body);
+END;
+CREATE TRIGGER IF NOT EXISTS skills_au AFTER UPDATE ON skills BEGIN
+    INSERT INTO skills_fts(skills_fts, rowid, name, title, summary, body)
+    VALUES ('delete', old.id, old.name, old.title, old.summary, old.body);
+    INSERT INTO skills_fts(rowid, name, title, summary, body) VALUES (new.id, new.name, new.title, new.summary, new.body);
+END;
+
+-- The trajectory index (jig.trajectory): a bounded, queryable index over what runs did, so a past run can
+-- inform a later one. Rows are never edited (the trigger below refuses it); they are deleted only by the
+-- bounded prune and by the forget-everything wipe, both of which remove whole rows and audit only counts.
+-- This is deliberately not the audit rule: audit is immutable forever by promise, the trajectory is a
+-- working index. It holds ids, names, statuses and a short redacted digest, never payloads.
+CREATE TABLE IF NOT EXISTS trajectory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    run_id TEXT,
+    task_id TEXT,
+    tool TEXT,
+    status TEXT,
+    error_type TEXT,
+    digest TEXT NOT NULL DEFAULT '',
+    run_kind TEXT,
+    mode TEXT
+);
+CREATE INDEX IF NOT EXISTS trajectory_run ON trajectory(run_id, id);
+CREATE INDEX IF NOT EXISTS trajectory_tool ON trajectory(tool, id);
+CREATE INDEX IF NOT EXISTS trajectory_status ON trajectory(status, id);
+CREATE TRIGGER IF NOT EXISTS trajectory_no_update BEFORE UPDATE ON trajectory BEGIN
+    SELECT RAISE(ABORT, 'trajectory log is append-only');
+END;
+
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -277,8 +370,10 @@ class Database:
             existing = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        # Recorded, never branched on (as always): an upgraded database records the version it now has.
         self._conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
+            "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (str(SCHEMA_VERSION),),
         )
 

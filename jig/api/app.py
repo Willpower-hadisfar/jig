@@ -150,6 +150,11 @@ class NotePatch(BaseModel):
     body: str | None = Field(None, min_length=1)
 
 
+class SkillStatusIn(BaseModel):
+    # The human's promotion decision: a candidate becomes 'active' only through this route (or Settings).
+    status: Literal["candidate", "active", "retired", "rejected"]
+
+
 class SecretIn(BaseModel):
     value: str = Field(min_length=1)
     allowed_tools: list[str] = []
@@ -761,20 +766,25 @@ def create_app(config: Config, *, start_reason: str = "manual") -> FastAPI:
 
     @app.post("/forget")
     async def forget_everything(request: Request, body: ConfirmIn) -> dict[str, Any]:
-        """Settings > Forget everything: every memory and note, every conversation and every finished job with its
-        results. Then the database file is rebuilt, so no deleted text is left in its free space."""
+        """Settings > Forget everything: every memory, fact and skill, every conversation and every finished
+        job with its results, and the trajectory index. Then the database file is rebuilt, so no deleted
+        text is left in its free space."""
         _require_confirm(body, "Nothing was deleted")
         jig = J(request)
         jobs = jig.wipe_jobs(vacuum=False)  # first: it is the one that can refuse (a task still stopping)
         conversations = jig.store.wipe_conversations(vacuum=False)
         memories = jig.memory.wipe()
+        facts = jig.facts.wipe()
+        skills = jig.skills.wipe()
         notes = jig.store.wipe_notes()
-        out = {"memories": memories["forgotten"], "notes": notes["deleted"],
+        trajectory = jig.trajectory.wipe()
+        out = {"memories": memories["forgotten"], "facts": facts["forgotten"], "skills": skills["forgotten"],
+               "notes": notes["deleted"], "trajectory": trajectory["deleted"],
                "conversations": conversations["conversations"], "goals": jobs["goals"], "tasks": jobs["tasks"],
                "kept_replying": conversations["kept_replying"], "kept_unfinished": jobs["kept_unfinished"],
                "wal_cleared": jig.db.vacuum()}
-        jig.audit.record("everything.forgotten", "memories, notes, conversations and finished jobs deleted",
-                         actor="user", **out, **_who(request))
+        jig.audit.record("everything.forgotten", "memories, facts, skills, notes, trajectory, conversations "
+                         "and finished jobs deleted", actor="user", **out, **_who(request))
         return out
 
     # Goals -----------------------------------------------------------------
@@ -1025,6 +1035,42 @@ def create_app(config: Config, *, start_reason: str = "manual") -> FastAPI:
         jig = J(request)
         jig.store.delete_note(note_id)
         jig.audit.record("note.deleted", f"note {note_id} deleted", actor="user", note_id=note_id, **_who(request))
+
+    # Skills: procedures Jig wrote, which the user promotes ------------------
+    # A candidate is Jig's draft of a procedure; it changes nothing until this route (or Settings, later)
+    # sets it active. The audit entries name the skill id and status, never its text.
+    @app.get("/skills")
+    async def list_skills(request: Request, status: str | None = None,
+                          limit: int = Query(50, le=500)) -> list[dict[str, Any]]:
+        return J(request).skills.list(status=status, limit=limit)
+
+    @app.get("/skills/{skill_id}")
+    async def get_skill(request: Request, skill_id: int) -> dict[str, Any]:
+        return J(request).skills.get(skill_id)
+
+    @app.patch("/skills/{skill_id}")
+    async def set_skill_status(request: Request, skill_id: int, body: SkillStatusIn) -> dict[str, Any]:
+        jig = J(request)
+        skill = jig.skills.set_status(skill_id, body.status)
+        jig.audit.record("skill.status", f"skill {skill_id} set to {body.status} by the user", actor="user",
+                         skill_id=skill_id, status=body.status, **_who(request))
+        return skill
+
+    # Facts: the keyed long-term state (author preferences, book-world state, project continuity) ----
+    @app.get("/facts")
+    async def list_facts(request: Request, scope: str | None = None, kind: str | None = None,
+                         status: str = "active", limit: int = Query(100, le=1_000),
+                         offset: int = 0) -> list[dict[str, Any]]:
+        return J(request).facts.list(scope=scope, kind=kind, status=status or None, limit=limit, offset=offset)
+
+    # Trajectory: the index over what past runs did (ids, names, statuses and short digests — never
+    # conversation text or tool payloads, in the same spirit as the audit log) ----------------------
+    @app.get("/trajectory")
+    async def trajectory(request: Request, kind: str | None = None, tool: str | None = None,
+                         status: str | None = None, run_id: str | None = None, task_id: str | None = None,
+                         since: str | None = None, limit: int = Query(200, le=5_000)) -> list[dict[str, Any]]:
+        return J(request).trajectory.query(kind=kind, tool=tool, status=status, run_id=run_id, task_id=task_id,
+                                           since=since, limit=limit)
 
     # Audit -----------------------------------------------------------------
     @app.get("/audit")

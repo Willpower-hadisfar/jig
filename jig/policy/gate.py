@@ -84,7 +84,7 @@ class ToolOutcome:
 class ToolExecutor:
     def __init__(self, *, registry: ToolRegistry, rules: RuleStore, sentinel: Sentinel, approvals: ApprovalQueue,
                  vault: Vault, audit: AuditLog, bus: EventBus, context_factory: Callable[[CallContext], ToolContext],
-                 always_redact: dict[str, str] | None = None, config: Any = None):
+                 always_redact: dict[str, str] | None = None, config: Any = None, trajectory: Any = None):
         self.registry = registry
         self.config = config
         # Values redacted from every tool result and error even when no secret was referenced (model API keys,
@@ -97,6 +97,21 @@ class ToolExecutor:
         self.audit = audit
         self.bus = bus
         self.context_factory = context_factory
+        # The trajectory index (jig.trajectory): one row per settled tool call, so a later run can ask what
+        # went wrong before. Optional: a stack that passes none records nothing extra.
+        self.trajectory = trajectory
+
+    def _record_step(self, call: ToolCall, ctx: CallContext, outcome: ToolOutcome) -> None:
+        """One trajectory row per settled tool call, built from names, statuses and the error *type* only —
+        never the error text, the arguments or the result — and run through the trajectory's redactions."""
+        if self.trajectory is None:
+            return
+        digest = f"{call.name} {'ok' if outcome.ok else 'failed'}"
+        if outcome.error_type:
+            digest += f" error_type={outcome.error_type}"
+        self.trajectory.record("step", run_id=ctx.run_id, task_id=ctx.task_id, tool=call.name,
+                               status="ok" if outcome.ok else "failed",
+                               error_type=outcome.error_type, digest=digest, mode=ctx.mode.value)
 
     async def execute(self, call: ToolCall, ctx: CallContext) -> ToolOutcome:
         policy: dict[str, Any] = {}
@@ -113,6 +128,7 @@ class ToolExecutor:
             self.audit.record("tool.error", f"{call.name} failed: {type(exc).__name__}", task_id=ctx.task_id,
                               run_id=ctx.run_id, tool=call.name, call_id=call.id, error_chars=len(str(exc)),
                               error_type=type(exc).__name__)
+        self._record_step(call, ctx, outcome)
         return outcome
 
     async def _execute(self, call: ToolCall, ctx: CallContext, policy: dict[str, Any]) -> Any:
