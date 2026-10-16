@@ -667,7 +667,7 @@ async def _chat(args: argparse.Namespace) -> int:
                 return 0
             if not message:
                 continue
-            body = {"message": message, "session_id": session_id, "mode": args.mode}
+            body = {"message": message, "session_id": session_id, "mode": args.mode, "scope": args.scope}
             pending: list[dict] = []
             async with client.stream("POST", f"{base}/chat", json=body) as r:
                 if r.status_code != 200:
@@ -739,6 +739,9 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("chat", help="chat with Jig in the terminal")
     c.add_argument("--url", help="Jig's address (default: the running Jig for this config, else [server] port)")
     c.add_argument("--mode", choices=["action", "research"], default="action")
+    c.add_argument("--scope", default="", help="the work this conversation is about ('book:<slug>', "
+                                               "'project:<slug>' or 'author'): Jig is given only that scope's "
+                                               "keyed facts, plus your own")
     c.add_argument("--show-thinking", action="store_true")
     h = sub.add_parser("health", help="check the configured models work with Jig")
     h.add_argument("--quick", action="store_true", help="only check that the models are served")

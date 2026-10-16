@@ -62,6 +62,9 @@ class ChatIn(BaseModel):
     action: Literal["send", "retry", "continue"] = "send"
     # Ids from POST /attachments, for this session_id. At most one message's worth.
     attachment_ids: list[str] = Field(default_factory=list, max_length=MAX_PER_MESSAGE)
+    # The work this conversation is about: 'book:<slug>', 'project:<slug>' or 'author'. The keyed facts the
+    # turn is given are that scope's and the author's; empty (the default) spans every scope.
+    scope: str = ""
 
 
 class TaskRetryIn(BaseModel):
@@ -700,7 +703,7 @@ def create_app(config: Config, *, start_reason: str = "manual") -> FastAPI:
     async def chat(request: Request, body: ChatIn) -> StreamingResponse:
         jig = J(request)
         stream = jig.chat(body.message, session_id=body.session_id, mode=body.mode, action=body.action,
-                          attachment_ids=body.attachment_ids)
+                          attachment_ids=body.attachment_ids, scope=body.scope)
         first = await anext(stream)
 
         async def gen() -> AsyncIterator[str]:
