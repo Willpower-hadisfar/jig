@@ -667,7 +667,7 @@ async def _chat(args: argparse.Namespace) -> int:
                 return 0
             if not message:
                 continue
-            body = {"message": message, "session_id": session_id, "mode": args.mode}
+            body = {"message": message, "session_id": session_id, "mode": args.mode, "scope": args.scope}
             pending: list[dict] = []
             async with client.stream("POST", f"{base}/chat", json=body) as r:
                 if r.status_code != 200:
@@ -675,6 +675,7 @@ async def _chat(args: argparse.Namespace) -> int:
                     print(f"Jig couldn't answer (error {r.status_code}): {_error_text(r)}")
                     continue
                 print("jig> ", end="", flush=True)
+                scope_note = ""
                 async for line in r.aiter_lines():
                     if not line:
                         continue
@@ -684,6 +685,14 @@ async def _chat(args: argparse.Namespace) -> int:
                         print(item["text"], end="", flush=True)
                     elif kind == "reasoning" and args.show_thinking:
                         print(f"\x1b[2m{item['text']}\x1b[0m", end="", flush=True)
+                    elif kind == "start":
+                        # Which work Jig answered in, when it worked that out for itself or was told to widen.
+                        scope_note = {"chosen": f"(about {item['scope']}, which Jig read off your message)",
+                                      "everything": "(Jig couldn't tell which work your message meant, so it was "
+                                                    "given every scope: --scope book:<slug> narrows it)",
+                                      "all": "(every scope, as you asked)",
+                                      "auto": "(Jig will read off each message which work it is about)"
+                                      }.get(item.get("scope_how"), "")
                     elif kind == "event":
                         _print_event(item["event"])
                         if item["event"]["type"] == "approval.requested" and not item["event"]["data"].get("resumed"):
@@ -692,6 +701,8 @@ async def _chat(args: argparse.Namespace) -> int:
                     elif kind == "done":
                         session_id = item["session_id"]
                         print()
+                        if scope_note:
+                            print(f"\x1b[2m{scope_note}\x1b[0m", flush=True)
                     elif kind == "error":
                         session_id = item["session_id"]
                         print(f"\nerror: {item['error']}")
@@ -739,6 +750,11 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("chat", help="chat with Jig in the terminal")
     c.add_argument("--url", help="Jig's address (default: the running Jig for this config, else [server] port)")
     c.add_argument("--mode", choices=["action", "research"], default="action")
+    c.add_argument("--scope", default="", help="the work this conversation is about ('book:<slug>', "
+                                               "'project:<slug>' or 'author'): Jig is given only that scope's "
+                                               "keyed facts, plus your own, and keeps it for the conversation. "
+                                               "'all' spans every scope on purpose; empty lets Jig read one off "
+                                               "each message")
     c.add_argument("--show-thinking", action="store_true")
     h = sub.add_parser("health", help="check the configured models work with Jig")
     h.add_argument("--quick", action="store_true", help="only check that the models are served")

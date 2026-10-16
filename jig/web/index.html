@@ -96,6 +96,15 @@
             <button type="submit" class="btn btn-primary" id="chat-send" data-testid="chat-send">Send</button>
           </div>
         </div>
+        <div class="chat-scope">
+          <label for="chat-scope">This conversation is about</label>
+          <input id="chat-scope" type="text" list="fact-scopes" spellcheck="false" autocomplete="off"
+                 placeholder="book:ember-island, project:garden-shed, author or all"
+                 aria-describedby="chat-scope-note" data-testid="chat-scope">
+          <datalist id="fact-scopes"></datalist>
+          <button type="button" class="btn-link" id="chat-scope-clear" data-testid="chat-scope-clear">Every work</button>
+          <span class="hint-quiet" id="chat-scope-note" aria-live="polite" data-testid="chat-scope-note"></span>
+        </div>
         <div class="chat-under">
           <span class="hint-quiet">Enter to send, Shift+Enter for a new line. You can attach a PNG, JPEG, Word, PDF, text or Markdown file.</span>
           <button type="button" class="btn-link" id="chat-new" data-testid="chat-new">New conversation</button>

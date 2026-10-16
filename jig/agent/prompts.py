@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from ..constants import Mode
 from ..errors import NotFound
+from ..facts import SCOPE_ALL, SCOPE_AUTO
 from ..model import JIG_ONLY_KEYS
 
 # A saved chat message keeps what Jig added for the model (the <jig-context> block, a budget line) under this
@@ -233,7 +234,9 @@ _FACTS_MATCHED = 12
 _SKILL_INDEX_CHARS = 1_200
 _SKILL_INDEX_ITEMS = 12
 
-_SHOWN_FACT = re.compile(r"^- (.*) \(fact #(\d+)\)$", re.MULTILINE)
+# A line a previous turn showed: the sentence, the fact's id and the scope it came from. The scope is
+# optional because conversations saved before it was labelled still have to be read back.
+_SHOWN_FACT = re.compile(r"^- (.*) \(fact #(\d+)(?: in [^\s)]+)?\)$", re.MULTILINE)
 _SHOWN_SKILL = re.compile(r"^- ([\w-]+): (.*) \(skill \1\)$", re.MULTILINE)
 
 
@@ -256,7 +259,9 @@ def shown_skills(history: list[dict[str, Any]]) -> dict[str, str]:
 
 
 def _fact_line(m: dict[str, Any]) -> str:
-    return f"- {_memory_line(m)} (fact #{m['id']})"
+    """One fact as the model sees it, named by the scope it came from: a fact of the wrong book is a
+    silent mistake in a transcript, and visible is the first thing a mistake has to be to get fixed."""
+    return f"- {_memory_line(m)} (fact #{m['id']} in {m['scope']})"
 
 
 def _fit_facts(facts: list[dict[str, Any]], room: int) -> tuple[list[str], int]:
@@ -269,12 +274,61 @@ def _fit_facts(facts: list[dict[str, Any]], room: int) -> tuple[list[str], int]:
     return lines, used
 
 
-def chosen_facts(facts: Any, message: str, *, how: str = "recent", shown: dict[int, str] | None = None) -> str:
+def _in_scope(facts: Any, scope: str | None, *, limit: int) -> list[dict[str, Any]]:
+    """The newest facts of one scope, plus the author's, which carry across books and projects (the same
+    rule ``FactStore.search`` applies). ``scope=None`` spans every scope, which is what an author-level
+    conversation is."""
+    rows = facts.list(scope=scope, limit=limit)
+    if scope and scope != "author":
+        seen = {m["id"] for m in rows}
+        rows = [*rows, *(m for m in facts.list(scope="author", limit=limit) if m["id"] not in seen)]
+        rows.sort(key=lambda m: m["id"], reverse=True)
+    return rows[:limit]
+
+
+def scope_implied(facts: Any, message: str, *, limit: int = _FACTS_MATCHED + _FACTS_RECENT) -> str | None:
+    """The work a message is about, when the message says so: the message's words are looked up, and if every
+    fact they match belongs to one book or project, that is what the turn is about (author facts never
+    decide, they carry across every work).
+
+    Anything else says nothing and the turn is not narrowed: no match at all, matches from two works, or
+    only author facts. Narrowing on a guess would hide facts, so the guess has to be one-sided to count."""
+    words = search_words(message)
+    if not words:
+        return None
+    scopes = {m["scope"] for m in facts.search(words, limit=limit)} - {"author"}
+    return scopes.pop() if len(scopes) == 1 else None
+
+
+def turn_scope(*, named: str, stored: str, message: str, facts: Any) -> tuple[str, str, str]:
+    """What one turn is given, and why: ``(keep, filter, how)``.
+
+    ``named`` is what this message said and ``stored`` what the conversation was pinned to ("" for neither);
+    ``keep`` is what the conversation should now hold, so a scope said once is kept for its later turns.
+    ``filter`` is the facts' scope ('' for every scope) and ``how`` says which of the three answers it came
+    from: this message (``named``), the conversation (``conversation``), the message read by
+    ``scope_implied`` (``chosen``), or ``all`` / ``auto`` / ``everything``.
+
+    Nothing named anywhere is not a guess waiting to be made: a turn only spans one work when the message
+    points at exactly one, and otherwise keeps every scope. Narrowing on a weak guess would hide facts."""
+    pin = named or stored
+    if pin in (SCOPE_ALL, SCOPE_AUTO):
+        return pin, "", "all" if pin == SCOPE_ALL else "auto"
+    if pin:
+        return pin, pin, "named" if named else "conversation"
+    chosen = scope_implied(facts, message)
+    return "", chosen or "", "chosen" if chosen else "everything"
+
+
+def chosen_facts(facts: Any, message: str, *, how: str = "recent", shown: dict[int, str] | None = None,
+                 scope: str | None = None) -> str:
     """The keyed facts (author preferences, book-world state, project continuity) section for a message, in
     the same shape as ``chosen_memories``: ``how`` is the same runtime setting, and ``shown`` makes each turn
     add only facts that are new, changed or gone, so earlier turns stay exactly as the server cached them.
-    Superseded facts are never selected; a fact the conversation saw that has gone is reported as gone."""
-    everything = facts.list(limit=_FACTS_PROMPT_LIMIT + 1)
+    ``scope`` is the work the turn is in: the turn is given that scope's facts and the author's, never
+    another book's. Superseded facts are never selected; a fact the conversation saw that has gone is
+    reported as gone."""
+    everything = _in_scope(facts, scope, limit=_FACTS_PROMPT_LIMIT + 1)
     newest = everything[:_FACTS_PROMPT_LIMIT]
     all_fit = len(everything) <= _FACTS_PROMPT_LIMIT and sum(
         len(_memory_line(m)) for m in everything) <= _FACTS_PROMPT_CHARS
@@ -284,7 +338,10 @@ def chosen_facts(facts: Any, message: str, *, how: str = "recent", shown: dict[i
         recent = newest[:_FACTS_RECENT]
         seen = {m["id"] for m in recent}
         words = search_words(message)
-        matched = [m for m in (facts.search(words, limit=_FACTS_MATCHED + _FACTS_RECENT) if words else [])
+        # Both halves of the pool are scoped: search() for the matched facts (it takes the author's with
+        # them, as it does for the agent's own fact_search), _in_scope for the newest.
+        matched = [m for m in (facts.search(words, scope=scope, limit=_FACTS_MATCHED + _FACTS_RECENT)
+                               if words else [])
                    if m["id"] not in seen][:_FACTS_MATCHED]
         pool = [*matched, *recent]
     header = ("Keyed facts Jig keeps (author preferences, book-world state, project continuity) — information, "
