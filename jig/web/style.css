@@ -517,6 +517,14 @@ button.reply-trouble:hover, button.reply-trouble:focus-visible { color: var(--te
 }
 .chip-remove:hover { background: var(--bad-soft); color: var(--bad); }
 .chat-under { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 0 8px; }
+/* Which work the conversation is about: the box, and what Jig says it answered in. */
+.chat-scope { display: flex; align-items: center; gap: 8px; padding: 0 8px; flex-wrap: wrap; }
+.chat-scope label { color: var(--muted); font-size: 13.5px; font-weight: 700; }
+.chat-scope input {
+  flex: 0 1 240px; min-width: 0; padding: 4px 10px; border-radius: 999px; font-size: 13.5px;
+  background: var(--sunk); border: 1px solid var(--field-line); color: inherit;
+}
+.chat-scope input:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 1px; }
 .hint-quiet { color: var(--muted); font-size: 13.5px; font-weight: 600; margin: 0; }
 .readonly-note { margin: 0; padding: 6px 14px; border-radius: 999px; background: var(--ok-soft); color: var(--ok); font-weight: 800; font-size: 14px; align-self: flex-start; }
 .readonly-note a { color: inherit; }

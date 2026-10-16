@@ -62,8 +62,11 @@ class ChatIn(BaseModel):
     action: Literal["send", "retry", "continue"] = "send"
     # Ids from POST /attachments, for this session_id. At most one message's worth.
     attachment_ids: list[str] = Field(default_factory=list, max_length=MAX_PER_MESSAGE)
-    # The work this conversation is about: 'book:<slug>', 'project:<slug>' or 'author'. The keyed facts the
-    # turn is given are that scope's and the author's; empty (the default) spans every scope.
+    # The work the conversation is about: 'book:<slug>', 'project:<slug>' or 'author'. The keyed facts the
+    # turn is given are that scope's and the author's. Empty (the default) says nothing: the conversation's
+    # pinned scope is inherited, and a conversation with none reads one off the message and falls back to
+    # every scope. 'all' deliberately spans every scope, 'auto' goes back to reading one per turn. Like a
+    # named scope, 'all' and 'auto' are kept for the conversation.
     scope: str = ""
 
 
@@ -715,7 +718,8 @@ def create_app(config: Config, *, start_reason: str = "manual") -> FastAPI:
 
     @app.get("/sessions/{session_id}")
     async def session(request: Request, session_id: str) -> dict[str, Any]:
-        return {"id": session_id, "messages": J(request).store.get_session(session_id)}
+        store = J(request).store
+        return {"id": session_id, "scope": store.session_scope(session_id), "messages": store.get_session(session_id)}
 
     # Deleting conversations and job results: the audit entries have ids and counts, never content -----------
     @app.get("/sessions")

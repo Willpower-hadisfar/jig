@@ -12,8 +12,8 @@ from typing import Any
 from .agent.loop import Agent, RunSpec
 from .agent.planner import Planner
 from .agent.prompts import (CONTEXT_KEY, CONTINUE_KEY, CONTINUE_PROMPT, OUTCOME_PROMPT, OUTCOME_SCHEMA, STOPPED_KEY,
-                            agent_system_prompt, chosen_facts, chosen_memories, chosen_skills, kept_apart,
-                            shown_facts, shown_memories, shown_skills, turn_context)
+                            agent_system_prompt, chosen_facts, chosen_memories, chosen_skills, kept_apart, shown_facts,
+                            shown_memories, shown_skills, turn_context, turn_scope)
 from .attachments import (ATTACHMENT_PAGE, IMAGE_KINDS, AttachmentStore, ensure_vision, expand_outgoing,
                           for_model_message, render_turn)
 from .audit import AuditLog, text_size
@@ -26,7 +26,7 @@ from .db import Database, new_id, now_iso
 from .discovery import check_context
 from .errors import CannotDelete, JigError, ModelCapabilityError, ModelStopped, NotFound, RefusedActions
 from .events import Event, EventBus, AvatarStateTracker
-from .facts import FactStore, valid_scope
+from .facts import FactStore, valid_turn_scope
 from .mcp import McpService
 from .memory import MemoryStore
 from .searxng import Searxng
@@ -777,14 +777,23 @@ class Jig:
         need vision; otherwise the turn stops before the model is asked, and says so.
 
         ``scope`` is the work this turn is about — ``'book:<slug>'``, ``'project:<slug>'`` or ``'author'``.
-        The keyed facts the turn is given are that scope's and the author's, so a conversation about one
-        book is never handed another's canon; empty or None spans every scope, as it always did."""
+        The keyed facts the turn is given are that scope's and the author's, so a conversation about one book
+        is never handed another's canon. It is said once and kept: a turn that names a scope pins it to the
+        conversation, and a later turn of that conversation that names none inherits it. A turn that names
+        none, in a conversation that says nothing, chooses one from the message itself (``scope_implied``)
+        and falls back to every scope when the message does not point at one work alone. ``'all'`` says
+        deliberately every scope and ``'auto'`` puts the conversation back to choosing per turn; both are kept
+        like a named scope, so a wrongly narrowed conversation can always be widened back.
+
+        The ``start`` and ``done`` items say what the turn was actually given: ``scope`` (empty: every scope)
+        and ``scope_how`` — ``named``, ``conversation``, ``chosen`` (read off the message), ``all``, ``auto``
+        or ``everything`` (nothing pointed at one work alone)."""
         if action not in ("send", "retry", "continue"):
             raise ValueError(f"action must be 'send', 'retry' or 'continue', not {action!r}")
         scope = (scope or "").strip() or None
-        if scope is not None and not valid_scope(scope):
+        if scope is not None and not valid_turn_scope(scope):
             raise ValueError("scope must be 'author', 'book:<slug>' or 'project:<slug>' (lower-case letters, "
-                             f"digits, '-' and '_'), not {scope!r}")
+                             f"digits, '-' and '_'), or 'all' or 'auto', not {scope!r}")
         attachment_ids = list(attachment_ids or [])
         if action == "send" and not message.strip() and not attachment_ids:
             raise ValueError("Write a message or attach a file.")
@@ -826,8 +835,13 @@ class Jig:
                               "conversation were left out of the prompt to fit the model's context", actor="runtime",
                               session_id=session_id, left_out=left_out, messages=len(history))
         memory_text = message.strip() or " ".join(m["name"] for m in metas)
+        # Which work this turn is about: what the message says, else what the conversation was pinned to,
+        # else what the message points at by itself (see turn_scope).
+        pin, facts_scope, scope_how = turn_scope(named=scope or "", stored=self.store.session_scope(session_id),
+                                                  message=memory_text, facts=self.facts)
         context = "" if continuing else self._turn_context(memory_text, shown_memories(shown),
-                                                           shown_facts(shown), shown_skills(shown), scope)
+                                                           shown_facts(shown), shown_skills(shown),
+                                                           facts_scope or None)
         replay = [for_model_message(m, self.attachments, session_id) for m in shown]
         if continuing:
             ask = CONTINUE_PROMPT
@@ -868,6 +882,12 @@ class Jig:
             return saved()
 
         run_id = self.store.create_run(kind="chat", mode=mode, session_id=session_id)
+
+        def persist(messages: list[dict[str, Any]]) -> None:
+            """Save the transcript with the conversation's scope kept: what this turn named, or inherited, is
+            what the next turn of this conversation inherits."""
+            self.store.save_session(session_id, messages, scope=pin or None)
+
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         arrived: list[str] = []  # the reply text of the model call in progress
 
@@ -891,7 +911,7 @@ class Jig:
             try:
                 result = await self.agent.run(messages, spec)
             except ModelStopped as exc:
-                self.store.save_session(session_id, answered_only(saved()))
+                persist(answered_only(saved()))
                 await queue.put({"type": "stopped", "reason": exc.stop.kind,
                                  "message": CHAT_CIRCLING if exc.stop.reason == "circling" else CHAT_STOPPED,
                                  "detail": exc.stop.describe(), "stop": exc.stop.record(), "relaxed": continuing,
@@ -900,7 +920,7 @@ class Jig:
             except RefusedActions as exc:
                 # The explanation stays in the conversation, so the model sees on the next turn why it stopped.
                 messages.append({"role": "assistant", "content": str(exc), STOPPED_KEY: {"kind": "refused"}})
-                self.store.save_session(session_id, answered_only(saved()))
+                persist(answered_only(saved()))
                 await queue.put({"type": "stopped", "reason": "refused", "message": str(exc),
                                  "refused": exc.record, "run_id": run_id, "session_id": session_id})
                 return
@@ -908,31 +928,33 @@ class Jig:
                 if arrived:
                     messages.append({"role": "assistant", "content": "".join(arrived),
                                      STOPPED_KEY: {"kind": "cancelled"}})
-                self.store.save_session(session_id, answered_only(saved()))
+                persist(answered_only(saved()))
                 raise
             except Exception as exc:
                 if not isinstance(exc, (JigError, OSError)):
                     log.exception("chat run %s crashed", run_id)
                 # What was said and done so far stays in the conversation, so it can be read and continued.
-                self.store.save_session(session_id, answered_only(saved()))
+                persist(answered_only(saved()))
                 await queue.put({"type": "error", "error": f"{type(exc).__name__}: {exc}", "run_id": run_id,
                                  "session_id": session_id})
                 return
             if result.nothing_more:
                 # The reply that had already arrived stays the stopped reply. An empty answer does not replace it.
-                self.store.save_session(session_id, history)
+                persist(history)
                 await queue.put({"type": "stopped", "reason": "nothing_more", "message": NOTHING_MORE,
                                  "run_id": run_id, "session_id": session_id})
                 return
-            self.store.save_session(session_id, finished())
+            persist(finished())
             done = {"limit_reached": True} if result.limit_reached else {}
             await queue.put({"type": "done", "final": result.final, "run_id": run_id, "session_id": session_id,
-                             "steps": result.steps, "claim_check": result.claim_check, **done, **extra})
+                             "steps": result.steps, "claim_check": result.claim_check, **done, **extra,
+                             "scope": facts_scope, "scope_how": scope_how})
 
         self.bus.add_listener(listener)
         runner = asyncio.create_task(drive())
         try:
-            yield {"type": "start", "run_id": run_id, "session_id": session_id, "action": action, **extra}
+            yield {"type": "start", "run_id": run_id, "session_id": session_id, "action": action,
+                   "scope": facts_scope, "scope_how": scope_how, **extra}
             while True:
                 item = await queue.get()
                 yield item

@@ -324,13 +324,23 @@ class Store:
             raise NotFound(f"session {session_id} does not exist")
         return json.loads(row["messages_json"])
 
-    def save_session(self, session_id: str, messages: list[dict[str, Any]]) -> None:
+    def save_session(self, session_id: str, messages: list[dict[str, Any]], *, scope: str | None = None) -> None:
+        """Save a conversation's transcript. ``scope`` says which work the conversation is about and pins it
+        there, so later turns inherit it: None leaves the pin as it is (the common case), "" clears it back
+        to "Jig chooses"."""
         ts = now_iso()
         self.db.execute(
-            "INSERT INTO sessions(id, messages_json, created_at, updated_at) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET messages_json = excluded.messages_json, updated_at = excluded.updated_at",
-            (session_id, dumps(messages), ts, ts),
+            "INSERT INTO sessions(id, messages_json, scope, created_at, updated_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET messages_json = excluded.messages_json, updated_at = excluded.updated_at, "
+            "scope = COALESCE(?, scope)",
+            (session_id, dumps(messages), scope or "", ts, ts, scope),
         )
+
+    def session_scope(self, session_id: str) -> str:
+        """The scope pinned to a conversation: '' when nobody has said (Jig chooses each turn). A conversation
+        that does not exist has said nothing either, so it answers '' rather than raising."""
+        row = self.db.one("SELECT scope FROM sessions WHERE id = ?", (session_id,))
+        return (row or {}).get("scope") or ""
 
     # Deleting conversations and job results ---------------------------------
     # Only finished ones can go: a chat that is still replying, or a job that is still running, is still writing
@@ -393,6 +403,9 @@ class Store:
             first = named
         out = {"id": sid, "title": " ".join(first.split())[:120], "started_at": row["started_at"],
                "updated_at": row["updated_at"], "messages": len(said),
+               # Which work the conversation is pinned to ('': Jig chooses each turn). The UI reads it back
+               # so reopening a conversation keeps answering in the same scope.
+               "scope": (session or {}).get("scope") or "",
                "replying": any(r["status"] == RunStatus.RUNNING for r in runs)}
         if with_messages:
             notes = {r["final"]: json.loads(r["output_json"])["notes"] for r in self.db.query(

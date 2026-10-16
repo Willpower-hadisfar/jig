@@ -31,9 +31,21 @@ _SCOPE = re.compile(r"^(?:author|book:[a-z0-9][a-z0-9_-]{0,63}|project:[a-z0-9][
 _WORD = re.compile(r"\w+", re.UNICODE)
 
 
+# Two answers a scope field can take that are not scopes themselves: "all" says "deliberately every scope,
+# don't narrow this" and "auto" says "Jig, choose one from what I wrote". Both are pinned to the
+# conversation like a named scope, so the answer holds for its later turns.
+SCOPE_ALL = "all"
+SCOPE_AUTO = "auto"
+
+
 def valid_scope(scope: str) -> bool:
     """Whether ``scope`` is a scope a fact can be filed under. The one owner of that shape is the store."""
     return bool(_SCOPE.match(scope))
+
+
+def valid_turn_scope(scope: str) -> bool:
+    """Whether a turn may be asked in ``scope``: a fact scope, or one of the two answers above."""
+    return scope in (SCOPE_ALL, SCOPE_AUTO) or valid_scope(scope)
 
 
 class FactStore:

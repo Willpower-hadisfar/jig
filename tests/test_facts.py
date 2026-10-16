@@ -11,12 +11,13 @@ from dataclasses import replace
 
 import pytest
 
-from jig.agent.prompts import CONTEXT_KEY, chosen_facts, shown_facts
+from jig.agent.prompts import CONTEXT_KEY, chosen_facts, shown_facts, turn_scope
 from jig.config import load_config
 from jig.db import Database
 from jig.errors import NotFound
 from jig.facts import FACT_CHARS, FactStore
 from jig.runtime import Jig
+from jig.store import Store
 
 from .memory_bank_helpers import BankStack
 
@@ -121,6 +122,52 @@ def _three_scopes(facts: FactStore) -> dict[str, dict]:
     rows["ember"] = facts.remember(content=EMBER_FACT, kind="world", scope="book:ember-island",
                                    subject="protagonist")
     return rows
+
+
+def test_a_scope_said_once_is_kept_for_the_conversation(tmp_path):
+    """The pin belongs to the conversation, not the message: said once, kept through every later turn of it,
+    changed when someone says otherwise, and gone with the conversation."""
+    store = Store(Database(tmp_path / "jig.db"))
+    ask = [{"role": "user", "content": "Who is the protagonist?"}]
+    store.save_session("s1", ask, scope="book:ember-island")
+    assert store.session_scope("s1") == "book:ember-island"
+
+    store.save_session("s1", ask)  # a later turn says nothing about scope
+    assert store.session_scope("s1") == "book:ember-island", "the conversation keeps what it was pinned to"
+
+    store.save_session("s1", ask, scope="all")  # widened on purpose
+    assert store.session_scope("s1") == "all"
+    store.save_session("s1", ask, scope="auto")  # back to Jig choosing per turn
+    assert store.session_scope("s1") == "auto"
+    store.save_session("s1", ask, scope="")
+    assert store.session_scope("s1") == ""
+    assert store.session_scope("a-conversation-that-does-not-exist") == ""
+
+
+def test_which_work_a_turn_is_about_is_decided_in_one_order(tmp_path):
+    """Message first, then the conversation, then the message read by Jig, then everything — and only a
+    message pointing at exactly one work narrows the turn."""
+    facts = _facts(tmp_path)
+    _three_scopes(facts)
+    about_ember = "How does Wren reach the lighthouse?"
+    about_two = "Who is the protagonist in this book?"  # Ember Island and the Salt Road both answer
+
+    assert turn_scope(named="book:salt-road", stored="book:ember-island", message=about_ember, facts=facts) == \
+        ("book:salt-road", "book:salt-road", "named"), "what this message says outranks what it said"
+    assert turn_scope(named="", stored="book:ember-island", message=about_two, facts=facts) == \
+        ("book:ember-island", "book:ember-island", "conversation"), "a scope said once is kept"
+    assert turn_scope(named="", stored="", message=about_ember, facts=facts) == \
+        ("", "book:ember-island", "chosen"), "one work in the message decides it"
+    assert turn_scope(named="", stored="", message=about_two, facts=facts) == ("", "", "everything"), \
+        "two works in the message decide nothing: narrowing here would hide one of them"
+    assert turn_scope(named="all", stored="book:ember-island", message=about_two, facts=facts) == ("all", "", "all")
+    assert turn_scope(named="auto", stored="book:ember-island", message=about_ember, facts=facts) == \
+        ("auto", "", "auto"), "'auto' widens a pinned conversation back to choosing per turn"
+
+    # And the answer is what the turn is actually given: the chosen scope's facts and the author's, no others.
+    _keep, filter_for, _how = turn_scope(named="", stored="", message=about_two, facts=facts)
+    turn = chosen_facts(facts, about_two, how="relevant", scope=filter_for or None)
+    assert SALT_FACT in turn and EMBER_FACT in turn, "an undecided turn spans the shelf, as it always did"
 
 
 async def test_a_turn_for_one_book_is_never_given_another_book_s_facts(tmp_path, monkeypatch):

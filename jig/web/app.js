@@ -1096,6 +1096,45 @@ let pending = []; // files chosen but not sent: {id, session_id, name, kind, byt
 const liveChatRuns = new Set(); // runs whose reply is streaming here; their approvals appear inside the reply
 const chatLog = $('chat-log');
 const chatInput = $('chat-input');
+const chatScope = $('chat-scope');
+
+/* Which work the conversation is about. Typed once, kept by Jig for the conversation's later turns; left
+   empty, Jig reads one off the message and says which it chose. 'all' spans every work on purpose. */
+const SCOPE_HOW_TEXT = {
+  named: (s) => `About ${s}, as you just said.`,
+  conversation: (s) => `About ${s}, as this conversation said.`,
+  chosen: (s) => `About ${s}, which Jig read off your message. Name the work below if that is wrong.`,
+  all: () => 'About every work, as you asked: Jig is shown every scope’s facts.',
+  auto: () => 'Jig will read off each message which work it is about.',
+  everything: () => 'Jig could not tell which work your message meant, so it was given every scope. Name the work below to narrow this.',
+};
+
+function showScope(scope, how) {
+  const say = SCOPE_HOW_TEXT[how] || ((s) => (s ? `About ${s}.` : ''));
+  // A conversation reopened after a reload arrives with its pinned scope and an empty box: show what is
+  // actually in force, so "what Jig is answering in" is never something you have to guess.
+  if (how === 'conversation' && scope && !chatScope.value.trim()) chatScope.value = scope;
+  $('chat-scope-note').textContent = say(scope || '');
+}
+
+// The slugs worth offering are the ones facts are already filed under; the list is a convenience, so a
+// failure just leaves the box to type in and the next focus tries again.
+async function fillScopes() {
+  if (chatScope.dataset.filled) return;
+  try {
+    const rows = await api('/facts?limit=1000');
+    $('fact-scopes').replaceChildren(...[...new Set(rows.map((r) => r.scope))].sort()
+      .map((s) => el('option', { value: s })));
+    chatScope.dataset.filled = '1';
+  } catch { /* typed in by hand instead */ }
+}
+chatScope.addEventListener('focus', fillScopes);
+$('chat-scope-clear').addEventListener('click', () => {
+  chatScope.value = 'all';
+  chatScope.focus();
+  showScope('', 'all'); // the note says it, rather than a second copy of the sentence here
+});
+chatScope.addEventListener('change', () => { $('chat-scope-note').textContent = ''; });
 
 function nearBottom() {
   return chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 80;
@@ -1352,6 +1391,7 @@ async function sendChat(message, { action = 'send', from = null, attachments = [
       sessionId = item.session_id;
       runId = item.run_id;
       liveChatRuns.add(runId);
+      showScope(item.scope, item.scope_how);
     } else if (item.type === 'reasoning') {
       if (!thinking) {
         const pre = el('pre');
@@ -1416,7 +1456,7 @@ async function sendChat(message, { action = 'send', from = null, attachments = [
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message, session_id: sessionId, mode: prefs.readOnly ? 'research' : 'action', action,
-          attachment_ids: attachments.map((a) => a.id),
+          attachment_ids: attachments.map((a) => a.id), scope: chatScope.value.trim(),
         }),
         signal: chatAbort.signal,
       });
@@ -1541,6 +1581,8 @@ function clearChat() {
   const drop = pending.splice(0);
   renderPending();
   sessionId = null;
+  chatScope.value = '';
+  $('chat-scope-note').textContent = '';
   chatLog.replaceChildren(welcome());
   if (!chatBusy) showWork(null);
   for (const a of drop) {

@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS schedules (
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     messages_json TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -326,7 +327,10 @@ _ADDED_COLUMNS = (("approvals", "resolved_json", "TEXT"),
                   # The goal a planning run planned; NULL for chat and task runs.
                   ("runs", "goal_id", "TEXT"),
                   # How a background task ended (jig.agent.prompts.OUTCOME_SCHEMA); NULL if it was not recorded.
-                  ("tasks", "outcome_json", "TEXT"))
+                  ("tasks", "outcome_json", "TEXT"),
+                  # The work a conversation is about (jig.facts scope): '' until someone says, then
+                  # 'book:<slug>' / 'project:<slug>' / 'author', or 'all' to say deliberately every work.
+                  ("sessions", "scope", "TEXT NOT NULL DEFAULT ''"))
 
 
 def now() -> datetime:

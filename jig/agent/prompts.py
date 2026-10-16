@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from ..constants import Mode
 from ..errors import NotFound
+from ..facts import SCOPE_ALL, SCOPE_AUTO
 from ..model import JIG_ONLY_KEYS
 
 # A saved chat message keeps what Jig added for the model (the <jig-context> block, a budget line) under this
@@ -283,6 +284,40 @@ def _in_scope(facts: Any, scope: str | None, *, limit: int) -> list[dict[str, An
         rows = [*rows, *(m for m in facts.list(scope="author", limit=limit) if m["id"] not in seen)]
         rows.sort(key=lambda m: m["id"], reverse=True)
     return rows[:limit]
+
+
+def scope_implied(facts: Any, message: str, *, limit: int = _FACTS_MATCHED + _FACTS_RECENT) -> str | None:
+    """The work a message is about, when the message says so: the message's words are looked up, and if every
+    fact they match belongs to one book or project, that is what the turn is about (author facts never
+    decide, they carry across every work).
+
+    Anything else says nothing and the turn is not narrowed: no match at all, matches from two works, or
+    only author facts. Narrowing on a guess would hide facts, so the guess has to be one-sided to count."""
+    words = search_words(message)
+    if not words:
+        return None
+    scopes = {m["scope"] for m in facts.search(words, limit=limit)} - {"author"}
+    return scopes.pop() if len(scopes) == 1 else None
+
+
+def turn_scope(*, named: str, stored: str, message: str, facts: Any) -> tuple[str, str, str]:
+    """What one turn is given, and why: ``(keep, filter, how)``.
+
+    ``named`` is what this message said and ``stored`` what the conversation was pinned to ("" for neither);
+    ``keep`` is what the conversation should now hold, so a scope said once is kept for its later turns.
+    ``filter`` is the facts' scope ('' for every scope) and ``how`` says which of the three answers it came
+    from: this message (``named``), the conversation (``conversation``), the message read by
+    ``scope_implied`` (``chosen``), or ``all`` / ``auto`` / ``everything``.
+
+    Nothing named anywhere is not a guess waiting to be made: a turn only spans one work when the message
+    points at exactly one, and otherwise keeps every scope. Narrowing on a weak guess would hide facts."""
+    pin = named or stored
+    if pin in (SCOPE_ALL, SCOPE_AUTO):
+        return pin, "", "all" if pin == SCOPE_ALL else "auto"
+    if pin:
+        return pin, pin, "named" if named else "conversation"
+    chosen = scope_implied(facts, message)
+    return "", chosen or "", "chosen" if chosen else "everything"
 
 
 def chosen_facts(facts: Any, message: str, *, how: str = "recent", shown: dict[int, str] | None = None,
