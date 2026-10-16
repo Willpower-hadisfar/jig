@@ -26,7 +26,7 @@ from .db import Database, new_id, now_iso
 from .discovery import check_context
 from .errors import CannotDelete, JigError, ModelCapabilityError, ModelStopped, NotFound, RefusedActions
 from .events import Event, EventBus, AvatarStateTracker
-from .facts import FactStore
+from .facts import FactStore, valid_scope
 from .mcp import McpService
 from .memory import MemoryStore
 from .searxng import Searxng
@@ -253,14 +253,16 @@ class Jig:
 
     def _turn_context(self, message: str, shown: dict[int, str] | None = None,
                       facts_shown: dict[int, str] | None = None,
-                      skills_shown: dict[str, str] | None = None) -> str:
+                      skills_shown: dict[str, str] | None = None,
+                      scope: str | None = None) -> str:
         """The time, the memories and keyed facts chosen for this message (less those already ``shown``), the
-        index of approved skills, and the step budget — all for the very end of the prompt. Nothing chosen
-        here ever reaches the system prompt or an earlier message: those stay byte for byte what the model
-        server cached."""
+        index of approved skills, and the step budget — all for the very end of the prompt. ``scope`` is the
+        work the turn is in: it is the keyed facts' filter, so a turn about one book is never handed
+        another's canon. Nothing chosen here ever reaches the system prompt or an earlier message: those
+        stay byte for byte what the model server cached."""
         how = self.config.runtime.memory_prompt
         memories = chosen_memories(self.memory, message, how=how, shown=shown)
-        facts = chosen_facts(self.facts, message, how=how, shown=facts_shown)
+        facts = chosen_facts(self.facts, message, how=how, shown=facts_shown, scope=scope)
         skills = chosen_skills(self.skills, shown=skills_shown)
         return turn_context(self.config.runtime.timezone, memories, max_steps=self.agent.max_steps,
                             facts=facts, skills=skills)
@@ -759,7 +761,8 @@ class Jig:
 
     # Chat ------------------------------------------------------------------
     async def chat(self, message: str = "", *, session_id: str | None = None, mode: Mode = Mode.ACTION,
-                   action: str = "send", attachment_ids: list[str] | None = None) -> AsyncIterator[dict[str, Any]]:
+                   action: str = "send", attachment_ids: list[str] | None = None,
+                   scope: str | None = None) -> AsyncIterator[dict[str, Any]]:
         """Stream one chat turn: reasoning/content deltas, tool and approval events, then ``done``, ``stopped``
         (Jig stopped the reply because it was repeating itself; what had arrived is kept) or ``error``.
 
@@ -771,9 +774,17 @@ class Jig:
         (the user's Stop), what was said and done so far is kept, with the part of the reply that had arrived.
 
         ``attachment_ids`` are files already stored for this conversation (``POST /attachments``). Pictures
-        need vision; otherwise the turn stops before the model is asked, and says so."""
+        need vision; otherwise the turn stops before the model is asked, and says so.
+
+        ``scope`` is the work this turn is about — ``'book:<slug>'``, ``'project:<slug>'`` or ``'author'``.
+        The keyed facts the turn is given are that scope's and the author's, so a conversation about one
+        book is never handed another's canon; empty or None spans every scope, as it always did."""
         if action not in ("send", "retry", "continue"):
             raise ValueError(f"action must be 'send', 'retry' or 'continue', not {action!r}")
+        scope = (scope or "").strip() or None
+        if scope is not None and not valid_scope(scope):
+            raise ValueError("scope must be 'author', 'book:<slug>' or 'project:<slug>' (lower-case letters, "
+                             f"digits, '-' and '_'), not {scope!r}")
         attachment_ids = list(attachment_ids or [])
         if action == "send" and not message.strip() and not attachment_ids:
             raise ValueError("Write a message or attach a file.")
@@ -816,7 +827,7 @@ class Jig:
                               session_id=session_id, left_out=left_out, messages=len(history))
         memory_text = message.strip() or " ".join(m["name"] for m in metas)
         context = "" if continuing else self._turn_context(memory_text, shown_memories(shown),
-                                                           shown_facts(shown), shown_skills(shown))
+                                                           shown_facts(shown), shown_skills(shown), scope)
         replay = [for_model_message(m, self.attachments, session_id) for m in shown]
         if continuing:
             ask = CONTINUE_PROMPT

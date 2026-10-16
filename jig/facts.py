@@ -31,6 +31,11 @@ _SCOPE = re.compile(r"^(?:author|book:[a-z0-9][a-z0-9_-]{0,63}|project:[a-z0-9][
 _WORD = re.compile(r"\w+", re.UNICODE)
 
 
+def valid_scope(scope: str) -> bool:
+    """Whether ``scope`` is a scope a fact can be filed under. The one owner of that shape is the store."""
+    return bool(_SCOPE.match(scope))
+
+
 class FactStore:
     def __init__(self, db: Database):
         self.db = db
