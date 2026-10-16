@@ -17,6 +17,16 @@ Open **Settings > Memory and notes**.
 
 With a cloud model, memories that were already sent in a request stay with the provider under its terms. Deleting them in Jig removes the copy on this computer.
 
+## Keyed facts, skills, and what past runs did
+
+Alongside the flat memories, Jig keeps three keyed stores in the same database, with the same rules: nothing leaves the computer, and **Forget everything…** deletes them all.
+
+1. **Keyed facts** are what Jig has learned, filed by *scope* (the author, one book, one project) and *kind*: a `preference` of yours, a fact of the `world` of a book, the `continuity` of the work in progress, or an `open_question` a failed job left behind. The agent files them as it works; an exact repeat is stored once, and a correction marks the old row `superseded` instead of deleting it. Facts Jig recorded are shown to it at the end of each message (newest first, or the ones that best match the message with `memory_prompt = "relevant"`), bounded to 1,500 characters, beside the memories' own 6,000. Facts you wrote yourself are never rewritten by Jig, and Jig never rewrites your memories by itself - that promise is unchanged.
+2. **Skills** are procedures the agent writes for itself after a task finally worked: candidates at first, and a candidate changes nothing and is never shown to the model. You make one active only by your own decision (the `PATCH /skills/{id}` API route sets the status; a Settings control is to come). Active skills appear in each new conversation as a short index of names and one-line summaries (bounded to 1,200 characters, 12 entries); Jig reads a full body only when it decides it needs one. A skill body describes how to produce something; it is checked at write time so it cannot just quote passages of the work itself.
+3. **The trajectory** is a bounded index of what past runs did: which tools ran, what succeeded, what failed and with what error type, and how tasks ended. It never holds what was said - no message, no tool argument, no result, no error text, exactly like the audit log - and entries cannot be edited. Jig can read it (`history_search`), so a job resembling one that went wrong before can find that out for itself; you can too, at `GET /trajectory`.
+
+**Forget everything…** now also deletes every fact, every skill (at any status) and the whole trajectory index, with the same secure deletion as everything else. The audit log still records only that it happened, with counts, never content.
+
 ## Conversations and jobs
 
 **Settings > Conversations and jobs** lists conversations and finished jobs. You can read one and delete one, or delete them all. Deleting a conversation or a finished job removes the copies of its text Jig kept (the conversation, the runs, the steps, and the approval details). Files Jig wrote in its folder stay: those are yours.

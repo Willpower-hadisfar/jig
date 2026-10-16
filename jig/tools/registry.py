@@ -46,6 +46,11 @@ class ToolContext:
     searxng: Any = None
     # Files attached in the current chat (jig.attachments.AttachmentStore). None outside a conversation.
     attachments: Any = None
+    # Keyed long-term state (jig.facts.FactStore), the skill bank (jig.skills.SkillBank) and the trajectory
+    # index (jig.trajectory.TrajectoryLog). None only where a stack has none (a bare registry in a test).
+    facts: Any = None
+    skills: Any = None
+    trajectory: Any = None
     session_id: str | None = None
 
 

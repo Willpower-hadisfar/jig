@@ -12,8 +12,8 @@ from typing import Any
 from .agent.loop import Agent, RunSpec
 from .agent.planner import Planner
 from .agent.prompts import (CONTEXT_KEY, CONTINUE_KEY, CONTINUE_PROMPT, OUTCOME_PROMPT, OUTCOME_SCHEMA, STOPPED_KEY,
-                            agent_system_prompt, chosen_memories, kept_apart, shown_memories,
-                            turn_context)
+                            agent_system_prompt, chosen_facts, chosen_memories, chosen_skills, kept_apart,
+                            shown_facts, shown_memories, shown_skills, turn_context)
 from .attachments import (ATTACHMENT_PAGE, IMAGE_KINDS, AttachmentStore, ensure_vision, expand_outgoing,
                           for_model_message, render_turn)
 from .audit import AuditLog, text_size
@@ -26,6 +26,7 @@ from .db import Database, new_id, now_iso
 from .discovery import check_context
 from .errors import CannotDelete, JigError, ModelCapabilityError, ModelStopped, NotFound, RefusedActions
 from .events import Event, EventBus, AvatarStateTracker
+from .facts import FactStore
 from .mcp import McpService
 from .memory import MemoryStore
 from .searxng import Searxng
@@ -40,9 +41,11 @@ from .policy.rules import RuleStore
 from .policy.sentinel import Sentinel
 from .sandbox import Sandbox
 from .scheduler import Scheduler
+from .skills import SkillBank
 from .store import Store
 from .tools.builtin import build_registry, http_client
 from .tools.registry import ToolContext
+from .trajectory import TrajectoryLog
 from .vault import Vault
 from .vision import VisionService
 
@@ -199,6 +202,11 @@ class Jig:
         # Redacted from every tool result and error. The connectors add each token they use to this same dict.
         self.redactions = {name: key for name, key in (("model API key", agent_key), ("Sentinel API key", sentinel_key))
                            if key}
+        # Keyed state, the skill bank and the trajectory index (jig.facts, jig.skills, jig.trajectory). The
+        # trajectory redacts digests with the same map every tool result redacts with, before storing them.
+        self.facts = FactStore(self.db)
+        self.skills = SkillBank(self.db)
+        self.trajectory = TrajectoryLog(self.db, redact=lambda text: Vault.redact(text, self.redactions))
         self.http = http_client()
         self.registry = build_registry()
         self.connections = ConnectionStore(self.db, self.vault, self.audit, config.connectors)
@@ -214,7 +222,7 @@ class Jig:
         self.executor = ToolExecutor(registry=self.registry, rules=self.rules, sentinel=self.sentinel,
                                      approvals=self.approvals, vault=self.vault, audit=self.audit, bus=self.bus,
                                      context_factory=self._tool_context, always_redact=self.redactions,
-                                     config=config)
+                                     config=config, trajectory=self.trajectory)
         self.agent = Agent(model=self.model, registry=self.registry, executor=self.executor, store=self.store,
                            bus=self.bus, audit=self.audit, max_steps=config.runtime.max_steps,
                            context_tokens=self.context_tokens, searxng=self.searxng)
@@ -243,11 +251,19 @@ class Jig:
         """The same for every turn in a mode, so the model server can reuse its prompt cache."""
         return agent_system_prompt(mode, self.config.runtime.timezone, can_run_code=self.container is not None)
 
-    def _turn_context(self, message: str, shown: dict[int, str] | None = None) -> str:
-        """The time, the memories chosen for this message (less those already ``shown``) and the step budget,
-        for the end of the prompt."""
-        memories = chosen_memories(self.memory, message, how=self.config.runtime.memory_prompt, shown=shown)
-        return turn_context(self.config.runtime.timezone, memories, max_steps=self.agent.max_steps)
+    def _turn_context(self, message: str, shown: dict[int, str] | None = None,
+                      facts_shown: dict[int, str] | None = None,
+                      skills_shown: dict[str, str] | None = None) -> str:
+        """The time, the memories and keyed facts chosen for this message (less those already ``shown``), the
+        index of approved skills, and the step budget — all for the very end of the prompt. Nothing chosen
+        here ever reaches the system prompt or an earlier message: those stay byte for byte what the model
+        server cached."""
+        how = self.config.runtime.memory_prompt
+        memories = chosen_memories(self.memory, message, how=how, shown=shown)
+        facts = chosen_facts(self.facts, message, how=how, shown=facts_shown)
+        skills = chosen_skills(self.skills, shown=skills_shown)
+        return turn_context(self.config.runtime.timezone, memories, max_steps=self.agent.max_steps,
+                            facts=facts, skills=skills)
 
     def _prepare_outgoing(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return expand_outgoing(messages, self.attachments)
@@ -256,7 +272,8 @@ class Jig:
         return ToolContext(sandbox=self.sandbox, memory=self.memory, store=self.store, config=self.config,
                            http=self.http, mode=ctx.mode, run_id=ctx.run_id, task_id=ctx.task_id,
                            vision=self.vision, container=self.container, connectors=self.connectors,
-                           searxng=self.searxng, attachments=self.attachments, session_id=ctx.session_id)
+                           searxng=self.searxng, attachments=self.attachments, session_id=ctx.session_id,
+                           facts=self.facts, skills=self.skills, trajectory=self.trajectory)
 
     def _container_backend(self) -> Any:
         """With ``[sandbox] backend = "container"`` (per-agent Docker), ``"compose"`` (sandbox services next
@@ -342,6 +359,12 @@ class Jig:
                           vault_backend=self.vault.backend, sandbox=str(self.sandbox.root),
                           start_reason=self.start_reason, model_server=model_server)
         self._recover()
+        # The trajectory index is a working record, bounded on purpose (unlike the audit log, which is
+        # immutable forever by promise): the oldest whole rows go first, and only a count is audited.
+        pruned = self.trajectory.prune()
+        if pruned:
+            self.audit.record("trajectory.pruned", f"{pruned} oldest trajectory rows deleted", actor="runtime",
+                              rows=pruned)
         await self.mcp.refresh_all()
         self._refresh_paused()
         if run_scheduler:
@@ -625,6 +648,9 @@ class Jig:
         except RefusedActions as exc:
             outcome = {"status": "could_not", "summary": str(exc), "basis": "Jig's record of the refused actions",
                        "refused": exc.record}
+            self.trajectory.record("failure", run_id=run_id, task_id=task_id, status="failed",
+                                   error_type="RefusedActions", digest="actions refused by policy or Sentinel",
+                                   mode=mode.value)
             self.set_task_status(task_id, TaskStatus.FAILED, error=str(exc), outcome_json=json.dumps(outcome))
             return
         except (JigError, OSError) as exc:
@@ -672,6 +698,9 @@ class Jig:
         self.audit.record("task.outcome", f"outcome: {outcome['status']}", actor="runtime", task_id=task_id,
                           run_id=result.run_id, status=outcome["status"], retries=list(reply.structured_retries),
                           summary_chars=len(outcome["summary"]), basis_chars=len(outcome["basis"]))
+        self.trajectory.record("outcome", run_id=result.run_id, task_id=task_id, status=outcome["status"],
+                               digest=f"task ended {outcome['status']} "
+                                      f"(summary {len(outcome['summary'])} chars, basis {len(outcome['basis'])} chars)")
         return outcome
 
     # Goals -----------------------------------------------------------------
@@ -786,7 +815,8 @@ class Jig:
                               "conversation were left out of the prompt to fit the model's context", actor="runtime",
                               session_id=session_id, left_out=left_out, messages=len(history))
         memory_text = message.strip() or " ".join(m["name"] for m in metas)
-        context = "" if continuing else self._turn_context(memory_text, shown_memories(shown))
+        context = "" if continuing else self._turn_context(memory_text, shown_memories(shown),
+                                                           shown_facts(shown), shown_skills(shown))
         replay = [for_model_message(m, self.attachments, session_id) for m in shown]
         if continuing:
             ask = CONTINUE_PROMPT
