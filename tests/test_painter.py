@@ -23,7 +23,8 @@ from PIL import Image
 from jig.config import PainterConfig, load_config
 from jig.constants import Decision, Effect, Mode, ToolCategory
 from jig.errors import ToolArgumentError, ToolError
-from jig.painter import BedrockDriver, DEFAULT_REFERENCES, Painter, painter_assets_dir
+from jig.painter import (BedrockDriver, DEFAULT_REFERENCES, Painter, composite_reference_plate,
+                         painter_assets_dir)
 from jig.policy.gate import CallContext
 from jig.sandbox import Sandbox
 from jig.tools.builtin import build_registry
@@ -149,6 +150,10 @@ def test_the_bedrock_call_asks_for_a_json_body_not_a_binary_image(tmp_path, monk
 
 
 def test_build_request_carries_the_style_plate_as_conditioning(tmp_path):
+    """The request body is exactly the field set this model accepts, nothing else. Bedrock rejects the call
+    outright if a field it does not recognise is present, so ``steps`` and ``cfg_scale`` must be gone, and this
+    painter always runs image-to-image, which takes no ``aspect_ratio``, so that is gone too. Before this
+    change the body carried all three extra fields, so these absence assertions would have failed."""
     painter = _painter(tmp_path)
     refs = painter.reference_images(None)
     request = painter.build_request("A rack of servers lit by candlelight", refs, seed=42,
@@ -158,9 +163,66 @@ def test_build_request_carries_the_style_plate_as_conditioning(tmp_path):
     assert request["prompt"] == "A rack of servers lit by candlelight"
     assert request["output_format"] == "png"
     assert len(request["image"]) > 0
-    plate = io.BytesIO(base64.b64decode(request["image"]))
-    assert Image.open(plate).size[1] == 512, "the composite style plate is a strip of the reference set"
     assert request["negative_prompt"], "there is a negative prompt with every request"
+    assert "steps" not in request, "steps is rejected by the model; it must not be sent"
+    assert "cfg_scale" not in request, "cfg_scale is rejected by the model; it must not be sent"
+    assert "aspect_ratio" not in request, "image-to-image takes no aspect ratio; it must not be sent"
+    assert set(request) == {"prompt", "negative_prompt", "mode", "strength", "seed", "output_format",
+                            "image"}, \
+        "the accepted field set is exactly what is sent"
+    plate = io.BytesIO(base64.b64decode(request["image"]))
+    assert Image.open(plate).size[1] == 512 * 2, "the composite style plate is a two-row reference grid"
+
+
+def _scaled_long_axis(plate: bytes) -> int:
+    """The length of the long axis after Bedrock scales the plate toward a one-megapixel target while
+    preserving its ratio (the behaviour that used to blow past 1536 on the strip plate)."""
+    im = Image.open(io.BytesIO(plate))
+    scale = (1_000_000 / (im.width * im.height)) ** 0.5
+    return max(round(im.width * scale), round(im.height * scale))
+
+
+def test_the_reference_plate_stays_inside_bedrocks_long_axis_limit(tmp_path):
+    """The one property Bedrock actually enforces: scaling the produced plate to a one-megapixel target while
+    preserving its ratio must leave the long axis at or below 1536. The old single-strip plate (three images
+    laid end-to-end, ~4:1) scaled past 1536 on the long axis and was rejected; the two-row grid stays inside
+    the limit. One, two, three and four references all lay out without gaps, zero-size cells or a bad height."""
+    painter = _painter(tmp_path)
+    refs = painter.reference_images(None)
+    sets = {1: refs[:1], 2: refs[:2], 3: refs, 4: refs + refs[:1]}
+    for n, chosen in sets.items():
+        plate = composite_reference_plate(chosen)
+        im = Image.open(io.BytesIO(plate))
+        assert im.size[1] == 512 * 2, f"{n}-reference plate is a two-row grid twice the strip height"
+        assert im.width > 0 and im.height > 0, f"{n}-reference plate has no zero-size cells"
+        assert _scaled_long_axis(plate) <= 1536, \
+            f"{n}-reference plate {im.size} scales past 1536 on the long axis at the one-megapixel target"
+
+
+def test_the_stability_images_branch_decodes_the_json_string(tmp_path, monkeypatch):
+    """The Stability response frame is ``{"images": [base64]}`` and the value out of the JSON parse is a
+    *string*; decoding it must use ``base64.b64decode`` (which accepts a str), not ``codecs.decode`` (which
+    needs bytes). This feeds the exact string shape the JSON parse really produces, so the old crash
+    (``TypeError`` on ``codecs.decode(str, ...)``) is pinned."""
+    import json as _json
+    import sys
+    import types
+
+    fake_png = b"\x89PNG\r\n\x1a\nfake"
+
+    class FakeClient:
+        def invoke_model(self, **kwargs):
+            body = {"images": [base64.b64encode(fake_png).decode()]}
+            return {"body": io.BytesIO(_json.dumps(body).encode())}
+
+    fake_boto3 = types.ModuleType("boto3")
+    fake_boto3.Session = lambda **creds: types.SimpleNamespace(client=lambda *a, **k: FakeClient())
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "fake-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fake-secret")
+
+    driver = BedrockDriver(PainterConfig())
+    assert driver.generate({"prompt": "a server room"}, "stability.sd3-5-large-v1:0") == fake_png
 
 
 def test_two_derivatives_from_one_generation(tmp_path):

@@ -19,7 +19,6 @@ only re-sizes and re-encodes the same bytes - it never judges them.
 from __future__ import annotations
 
 import base64
-import codecs
 import io
 import json
 import os
@@ -75,9 +74,13 @@ def painter_assets_dir() -> Path:
 def composite_reference_plate(images: list[bytes], *, strip_height: int = 512) -> bytes:
     """One style-conditioning image from the locked reference set.
 
-    Each reference is scaled to ``strip_height`` pixels tall and laid side by side, so a whole generation
-    carries the trio's shared technique as a single img2img input (Bedrock takes one conditioning image per
-    call; the composite is that one). Returns PNG bytes.
+    Each reference is scaled to ``strip_height`` pixels tall and laid out as a two-row grid (the first
+    ``ceil(n/2)`` references on the top row, the remainder below), sized to the wider row and twice the strip
+    height, so a whole generation carries the set's shared technique as a single img2img input (Bedrock takes
+    one conditioning image per call; the composite is that one). The grid matters because Bedrock scales the
+    conditioning image toward a one-megapixel target while preserving its ratio: a long single strip grows past
+    1536 on the long axis and is rejected, while the roughly square two-row grid stays inside that limit.
+    Returns PNG bytes.
     """
     if not images:
         raise PainterError("the reference set is empty; there is nothing to condition the painting on")
@@ -86,12 +89,15 @@ def composite_reference_plate(images: list[bytes], *, strip_height: int = 512) -
         im = Image.open(io.BytesIO(raw)).convert("RGB")
         scale = strip_height / im.height
         cells.append(im.resize((max(1, round(im.width * scale)), strip_height), Image.LANCZOS))
-    total = sum(c.width for c in cells)
-    plate = Image.new("RGB", (total, strip_height), (0, 0, 0))
-    x = 0
-    for cell in cells:
-        plate.paste(cell, (x, 0))
-        x += cell.width
+    top = cells[: (len(cells) + 1) // 2]
+    bottom = cells[len(top):]
+    width = max(sum(c.width for c in top), sum(c.width for c in bottom))
+    plate = Image.new("RGB", (width, strip_height * 2), (0, 0, 0))
+    for row, y in ((top, 0), (bottom, strip_height)):
+        x = 0
+        for cell in row:
+            plate.paste(cell, (x, y))
+            x += cell.width
     out = io.BytesIO()
     plate.save(out, "PNG", optimize=True)
     return out.getvalue()
@@ -132,7 +138,7 @@ class BedrockDriver:
         body = json.loads(response["body"].read())
         # Stability: {"images": [base64]}; older Amazon frames: {"artifacts": [{"base64": ...}]}.
         if body.get("images"):
-            return codecs.decode(body["images"][0], "base64")
+            return base64.b64decode(body["images"][0])
         if body.get("artifacts"):
             return base64.b64decode(body["artifacts"][0]["base64"])
         raise PainterError(f"the image model returned no image (response keys: {sorted(body)})")
@@ -187,17 +193,13 @@ class Painter:
         if not prompt or not prompt.strip():
             raise PainterError("a painting needs a subject prompt")
         plate = composite_reference_plate(reference_images)
-        aspect = aspect_ratio or self.config.aspect_ratio
         return {
             "prompt": prompt,
             "mode": "image-to-image",
             "image": base64.b64encode(plate).decode(),
             "strength": strength if strength is not None else self.config.strength,
-            "aspect_ratio": aspect,
             "output_format": self.config.output_format,
             "seed": int(seed),
-            "steps": self.config.steps,
-            "cfg_scale": self.config.cfg_scale,
             "negative_prompt": negative_prompt or _NEGATIVE,
         }
 
