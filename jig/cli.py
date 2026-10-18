@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import sys
+from pathlib import Path
 
 import httpx
 
@@ -461,6 +462,51 @@ def _model_cloud(args: argparse.Namespace, config) -> int:
         db.close()
 
 
+def _skills(args: argparse.Namespace) -> int:
+    """``jig skills import <file>``: load a versioned skill definition (skills/*.json) into the bank.
+
+    Lands as a candidate that changes nothing; ``--activate`` promotes it (the human's own decision). Works
+    whether or not Jig is running - it reads the file and this config's database directly.
+    """
+    import json as _json
+
+    from .db import Database
+    from .skills import SkillBank
+
+    config = load_config(args.config, **({"data_dir": args.data_dir} if args.data_dir else {}))
+    db = Database(config.db_path)
+    bank = SkillBank(db)
+    try:
+        definition = _json.loads(Path(args.file).read_text(encoding="utf-8"))
+        skill = bank.import_definition(definition)
+        if args.activate:
+            skill = bank.set_status(skill["id"], "active")
+    except ValueError as exc:
+        # Import lands as a candidate; a re-run with --activate should promote the candidate already there.
+        if not args.activate or not (n := definition.get("name")):
+            print(f"skills import: {exc}", file=sys.stderr)
+            return 1
+        existing = bank.get_by_name(n)
+        if existing["status"] not in ("candidate", "active"):
+            print(f"skills import: {n!r} is {existing['status']}, not a candidate to promote", file=sys.stderr)
+            return 1
+        skill = bank.set_status(existing["id"], "active")
+    except (FileNotFoundError, _json.JSONDecodeError) as exc:
+        print(f"skills import: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+    if args.json:
+        print(_json.dumps({"skill_id": skill["id"], "name": skill["name"], "status": skill["status"]}))
+    else:
+        print(f"{skill['name']}: {skill['status']} (skill {skill['id']}). " + (
+            "Active now - it will appear in the index of approved skills."
+            if skill["status"] == "active"
+            else "A candidate: it changes nothing until a human promotes it (jig skills import --activate, "
+                 "or PATCH /skills/{id})."))
+    return 0
+
+
 def _model(args: argparse.Namespace) -> int:
     """``jig model status|start|stop``: the model server that the running Jig launched and supervises.
     ``jig model key ...`` and ``jig model cloud ...`` work without a running Jig."""
@@ -789,6 +835,14 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--json", action="store_true", help="machine-readable output")
     r.add_argument("--port", type=int, help="Jig's port (default: [server] port)")
     r.add_argument("--data-dir", help="data directory (default: from the config)")
+    sk = sub.add_parser("skills", help="the skill bank: load a versioned skill definition from a file")
+    sk.add_argument("action", choices=["import"], help="import: load a skills/*.json definition as a candidate")
+    sk.add_argument("file", help="path to the skill definition JSON (name, title, summary, body, scope)")
+    sk.add_argument("--activate", action="store_true",
+                    help="promote the imported skill to active right away (the human's own decision; without "
+                         "this it is a candidate that changes nothing)")
+    sk.add_argument("--json", action="store_true", help="machine-readable output")
+    sk.add_argument("--data-dir", help="data directory (default: from the config)")
     connectors_cli.add_parsers(sub)
     add_search_parsers(sub)
     args = parser.parse_args(argv)
@@ -804,6 +858,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_search(args)
         if args.command == "model":
             return _model(args)
+        if args.command == "skills":
+            return _skills(args)
         if args.command == "remote":
             return _remote(args)
         if args.command == "sandbox":

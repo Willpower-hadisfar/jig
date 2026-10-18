@@ -150,6 +150,50 @@ class VisionConfig:
 
 
 @dataclass(frozen=True)
+class PainterConfig:
+    """``[painter]``: optional image generation through AWS Bedrock (the house-style book-art painter).
+
+    Off by default. When ``enabled = true`` the ``paint_image`` tool is offered; it generates one image and
+    writes two derivatives (a 300 DPI print PNG and a compressed EPUB variant) from that single generation.
+    The style is carried by image-conditioned references (a locked, public-domain reference set), not by
+    prompt text alone, and Jig never reviews its own output: a human curates every image.
+    """
+
+    enabled: bool = False
+    # AWS Bedrock model id. Stability AI SD3.5 Large (stability.sd3-5-large-v1:0) by default, which Bedrock
+    # serves and which takes image-to-image conditioning well; Amazon Titan Image Generator v2
+    # (amazon.titan-image-generator-v2:0) is the supported alternative.
+    model_id: str = "stability.sd3-5-large-v1:0"
+    # AWS region for bedrock-runtime (default: AWS_REGION/AWS_DEFAULT_REGION, else us-east-1).
+    region: str = ""
+    # Names of environment variables holding the AWS access key pair (default AWS_ACCESS_KEY_ID /
+    # AWS_SECRET_ACCESS_KEY). Only names, never the secrets; nothing is written to disk or the vault.
+    access_key_id_env: str = ""
+    access_key_secret_env: str = ""
+    # Locked house-style reference set: filenames (public-domain Rembrandt paintings) under reference_dir.
+    # The whole set is composited into one style plate and passed as image conditioning, so a book's art
+    # keeps one visual identity instead of each generation reinterpreting "Rembrandt" from a prompt.
+    references: tuple[str, ...] = ()
+    # Folder holding the reference set (absolute, or relative to this config file). Empty: the reference
+    # images shipped with Jig under ``assets/painter/rembrandt``.
+    reference_dir: str = ""
+    # img2img strength of the style plate (0.0 = no style bleed, 1.0 = wholesale). Low keeps the painting
+    # technique without swallowing the subject.
+    strength: float = 0.35
+    steps: int = 40
+    cfg_scale: float = 5.0
+    aspect_ratio: str = "16:9"
+    # The output contract: one generation, two derivatives.
+    output_format: str = "png"
+    # The print PNG is written with this DPI metadata, so Leanpub's print PDF sizes it without resampling.
+    print_dpi: int = 300
+    # The EPUB variant is scaled so its longest side is at most this many pixels, then saved as a
+    # compressed JPEG at epub_quality.
+    epub_max_width: int = 1200
+    epub_quality: int = 82
+
+
+@dataclass(frozen=True)
 class SandboxConfig:
     # "directory": file tools are confined to a folder (no code execution, no browser).
     # "container": code, shell and the headless browser run in a hardened per-agent Docker container.
@@ -267,6 +311,7 @@ class Config:
     sandbox_dir: Path
     source: Path
     vision: VisionConfig = field(default_factory=VisionConfig)
+    painter: PainterConfig = field(default_factory=PainterConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     model_launch: ModelLaunchConfig = field(default_factory=ModelLaunchConfig)
     vault: VaultConfig = field(default_factory=VaultConfig)
@@ -427,6 +472,7 @@ def load_config(path: str | os.PathLike[str] | None = None, **overrides: Any) ->
         sandbox_dir=sandbox_dir.resolve(),
         source=config_path.resolve(),
         vision=_build(VisionConfig, _section(raw, "vision"), "vision"),
+        painter=_painter_config(_section(raw, "painter"), base),
         sandbox=_sandbox_config(_section(raw, "sandbox"), overrides.get("sandbox_backend")),
         model_launch=model_launch,
         vault=_vault_config(_section(raw, "vault")),
@@ -615,6 +661,23 @@ def _autostart_config(values: dict[str, Any]) -> AutostartConfig:
     if cfg.launcher not in ("service", "tray"):
         raise ConfigError(f"[autostart] launcher must be 'service' or 'tray', not {cfg.launcher!r}")
     return replace(cfg, entry=cfg.entry.strip())
+
+
+def _painter_config(values: dict[str, Any], base: Path) -> PainterConfig:
+    cfg = _build(PainterConfig, values, "painter")
+    if cfg.enabled and cfg.model_id not in ("stability.sd3-5-large-v1:0",
+                                            "amazon.titan-image-generator-v2:0"):
+        raise ConfigError(f"[painter] model_id must be one of the supported Bedrock image models, not "
+                          f"{cfg.model_id!r}")
+    if cfg.enabled and not (cfg.steps > 0 and cfg.cfg_scale > 0):
+        raise ConfigError("[painter] steps and cfg_scale must both be more than 0")
+    if cfg.enabled and not (0 < cfg.strength <= 1.0):
+        raise ConfigError("[painter] strength must be between 0 (exclusive) and 1")
+    reference_dir = cfg.reference_dir
+    if reference_dir:
+        ref = Path(reference_dir)
+        reference_dir = str(ref.resolve() if ref.is_absolute() else (base / ref).resolve())
+    return replace(cfg, reference_dir=reference_dir)
 
 
 def _vault_config(values: dict[str, Any]) -> VaultConfig:

@@ -89,6 +89,23 @@ class SkillBank:
             raise NotFound(f"skill {skill_id} does not exist")
         return row
 
+    def import_definition(self, definition: dict[str, Any]) -> dict[str, Any]:
+        """Load a versioned, checked-in skill definition as a candidate, exactly as the agent would have
+        proposed it: same validation, same status, same search index. Only ``set_status`` (a human action)
+        can make it active, so an import never steers anything on its own.
+
+        ``definition`` is a JSON object with keys name, title, summary, body and scope (see the skill
+        definitions shipped under ``skills/``). Unknown extra keys are ignored so the same file can carry
+        provenance notes the bank has no column for.
+        """
+        missing = [k for k in ("name", "title", "summary", "body", "scope") if k not in definition]
+        if missing:
+            raise ValueError(f"a skill definition needs name, title, summary, body and scope; missing "
+                             f"{', '.join(missing)}")
+        return self.propose(name=str(definition["name"]), title=str(definition["title"]),
+                            summary=str(definition["summary"]), body=str(definition["body"]),
+                            scope=str(definition.get("scope") or "author"), source="skill definition file")
+
     def get_by_name(self, name: str) -> dict[str, Any]:
         row = self.db.one("SELECT * FROM skills WHERE name = ?", (name,))
         if row is None:
