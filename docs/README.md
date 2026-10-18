@@ -9,5 +9,6 @@ These are the user guides for this beta (version 0.1.0b2). The [README](../READM
 - [Search](search.md): optional web search with SearXNG.
 - [MCP servers](mcp.md): extra tools from a program on this computer.
 - [Memory, notes and background jobs](memory-and-background.md): what Jig remembers, and schedules.
+- [Painting book art](painter.md): optional AWS Bedrock image generation for your books (off by default).
 
 Running code and the browser need Docker. That is covered in the README under [Container sandbox and headless browser](../README.md#container-sandbox-and-headless-browser), and in [container.md](container.md).

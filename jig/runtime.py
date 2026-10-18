@@ -35,6 +35,7 @@ from .logs import describe_exception
 from .model import ATTACHMENTS_KEY, ModelClient
 from .model_server import ModelServerSupervisor
 from .pause import RunPaused
+from .painter import Painter
 from .policy.approvals import ApprovalQueue
 from .policy.gate import CallContext, ToolExecutor
 from .policy.rules import RuleStore
@@ -215,6 +216,10 @@ class Jig:
         self.mcp = McpService(self.db, self.vault, self.audit, self.registry, self.redactions)
         self.searxng = Searxng(config.data_dir, audit=self.audit)
         self.vision = VisionService(self.model, config.vision)
+        self.painter = Painter(config.painter)
+        from .tools.painter import register_painter_tools
+
+        register_painter_tools(self.registry, self.painter)
         self.rules = RuleStore(self.db)
         self.container = self._container_backend()
         self.sentinel = Sentinel(self.sentinel_model)

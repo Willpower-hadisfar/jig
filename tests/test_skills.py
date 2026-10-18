@@ -6,6 +6,8 @@ Real SQLite and the real gate throughout. Promotion is what the ``PATCH /skills/
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from jig.agent.prompts import chosen_skills
@@ -94,3 +96,27 @@ async def test_skill_tools_through_the_gate(tmp_path):
     assert read.ok and read.result["status"] == "active" and "warning" not in read.result
     assert stack.trajectory.query(kind="skill.used", tool="name-sweep"), "a read of an approved skill is recorded"
     stack.close()
+
+
+def test_the_shipped_painter_definition_resolves_like_any_skill(tmp_path):
+    """The painter skill ships as a versioned definition that imports into the same bank, is discovered by
+    the same tools, and promotes only by a human action - exactly like a skill Jig wrote itself."""
+    import json as _json
+
+    from jig.agent.prompts import chosen_skills
+
+    definition = _json.loads((Path(__file__).parent.parent / "skills"/ "rembrandt-tech-painter.json")
+                             .read_text(encoding="utf-8"))
+    bank = _bank(tmp_path)
+    assert definition["name"] == "rembrandt-tech-painter" and definition["scope"] == "author"
+    assert len(definition["references"]) == 3, "the versioned source records the locked reference set"
+
+    skill = bank.import_definition(definition)
+    assert skill["status"] == "candidate"
+    assert bank.search("rembrandt", status="candidate")[0]["name"] == "rembrandt-tech-painter"
+    assert chosen_skills(bank) == "", "a candidate never enters a prompt"
+    assert bank.get_by_name("rembrandt-tech-painter")["body"] == definition["body"]
+
+    promoted = bank.set_status(skill["id"], "active")
+    assert promoted["status"] == "active" and promoted["promoted_at"]
+    assert "rembrandt-tech-painter" in chosen_skills(bank), "active: discoverable the way existing skills are"
