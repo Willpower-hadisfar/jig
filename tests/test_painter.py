@@ -23,7 +23,7 @@ from PIL import Image
 from jig.config import PainterConfig, load_config
 from jig.constants import Decision, Effect, Mode, ToolCategory
 from jig.errors import ToolArgumentError, ToolError
-from jig.painter import DEFAULT_REFERENCES, Painter, painter_assets_dir
+from jig.painter import BedrockDriver, DEFAULT_REFERENCES, Painter, painter_assets_dir
 from jig.policy.gate import CallContext
 from jig.sandbox import Sandbox
 from jig.tools.builtin import build_registry
@@ -111,6 +111,41 @@ async def test_a_bad_slug_is_refused_before_any_generation(tmp_path):
 
 
 # The one-generation, two-derivative output contract -----------------------------
+
+
+def test_the_bedrock_call_asks_for_a_json_body_not_a_binary_image(tmp_path, monkeypatch):
+    """The response is parsed as JSON carrying a base64 image, so the request's accepted media type must be
+    ``application/json``; ``image/png`` (a binary image body) makes Bedrock reject the call before it paints
+    anything. No real AWS here: boto3 is faked into ``sys.modules`` and the assertion is on the arguments the
+    code sends to ``invoke_model``, not on a live response. The fake body uses the ``artifacts`` base64 frame,
+    the branch that decodes a JSON-string image, so the sole failure against the old ``accept="image/png"``
+    argument is the accept-assertion itself and not a decode side-effect."""
+    import json as _json
+    import sys
+    import types
+
+    seen: dict[str, object] = {}
+
+    class FakeClient:
+        def invoke_model(self, **kwargs):
+            seen.update(kwargs)
+            body = {"artifacts": [{"base64": base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()}]}
+            return {"body": io.BytesIO(_json.dumps(body).encode())}
+
+    fake_boto3 = types.ModuleType("boto3")
+    fake_boto3.Session = lambda **creds: types.SimpleNamespace(client=lambda *a, **k: FakeClient())
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "fake-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fake-secret")
+
+    driver = BedrockDriver(PainterConfig())
+    out = driver.generate({"prompt": "a server room"}, "stability.sd3-5-large-v1:0")
+    assert out == b"\x89PNG\r\n\x1a\nfake", "the JSON body's base64 image round-trips to bytes"
+    assert seen["accept"] == "application/json", \
+        "the response is read as JSON, so Bedrock must be asked for application/json; accept=\"image/png\" " \
+        "rejects the call before any image is generated"
+    assert seen["contentType"] == "application/json", "the request body itself is still JSON"
+    assert seen["modelId"] == "stability.sd3-5-large-v1:0", "the configured model is passed through"
 
 
 def test_build_request_carries_the_style_plate_as_conditioning(tmp_path):

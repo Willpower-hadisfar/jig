@@ -127,7 +127,7 @@ class BedrockDriver:
 
         creds = self.credentials()
         client = boto3.Session(**creds).client("bedrock-runtime", region_name=creds["region_name"])
-        response = client.invoke_model(modelId=model_id, accept="image/png", contentType="application/json",
+        response = client.invoke_model(modelId=model_id, accept="application/json", contentType="application/json",
                                        body=json.dumps(request))
         body = json.loads(response["body"].read())
         # Stability: {"images": [base64]}; older Amazon frames: {"artifacts": [{"base64": ...}]}.
