@@ -24,7 +24,7 @@ from jig.config import PainterConfig, load_config
 from jig.constants import Decision, Effect, Mode, ToolCategory
 from jig.errors import ToolArgumentError, ToolError
 from jig.painter import (BedrockDriver, DEFAULT_REFERENCES, Painter, composite_reference_plate,
-                         painter_assets_dir)
+                         painter_assets_dir, upscaled_for_print)
 from jig.policy.gate import CallContext
 from jig.sandbox import Sandbox
 from jig.tools.builtin import build_registry
@@ -235,21 +235,57 @@ def test_two_derivatives_from_one_generation(tmp_path):
     epub_path = images_dir / "rack-room_epub.jpg"
     assert print_path.is_file() and epub_path.is_file()
 
+    # The default 6x9in trim at 300 DPI (1800x2700) is wider-bound for a 1536x1024 native generation: the
+    # width ratio (1800/1536) is the smaller of the two, so that's the scale actually applied.
+    print_w, print_h = 1800, 1200
     print_im = Image.open(print_path)
-    assert print_im.format == "PNG" and print_im.size == (WIDTH, HEIGHT)
+    assert print_im.format == "PNG" and print_im.size == (print_w, print_h), \
+        "the native 1536x1024 generation is upscaled to fill the trim box, not written at its native size"
     px, py = print_im.info.get("dpi") or (0, 0)
     assert abs(px - painter.config.print_dpi) < 0.01 and abs(py - painter.config.print_dpi) < 0.01, \
-        "the print PNG carries ~300 DPI metadata so Leanpub's print PDF sizes it without resampling"
+        "the print PNG carries ~300 DPI metadata so Leanpub's print PDF renders it at the intended page size"
 
     epub_im = Image.open(epub_path)
     assert epub_im.format == "JPEG" and epub_im.mode == "RGB"
     assert epub_im.width == painter.config.epub_max_width, "the EPUB variant is scaled to a reader-safe width"
-    assert epub_im.height < HEIGHT
+    assert epub_im.height < HEIGHT, "the EPUB variant is derived from the native generation, not the upscaled print copy"
     assert epub_path.stat().st_size < print_path.stat().st_size, "the EPUB variant is the compressed one"
 
     assert result["generation"]["dpi"] == 300
+    assert result["generation"]["pixels"] == f"{WIDTH}x{HEIGHT}", "generation reports the native pixel count"
     assert result["print"]["path"].endswith("_print.png") and result["epub"]["path"].endswith("_epub.jpg")
-    assert result["print"]["pixels"] == f"{WIDTH}x{HEIGHT}" and result["epub"]["pixels"] == f"{epub_im.width}x{epub_im.height}"
+    assert result["print"]["pixels"] == f"{print_w}x{print_h}", "print reports the upscaled pixel count"
+    assert result["epub"]["pixels"] == f"{epub_im.width}x{epub_im.height}"
+
+
+# The print-derivative upscale: fills the trim box, never shrinks -----------------
+
+
+def _solid(size: tuple[int, int]) -> Image.Image:
+    return Image.new("RGB", size, (10, 20, 30))
+
+
+def test_upscaled_for_print_fills_the_trim_box_preserving_aspect():
+    """A native generation smaller than the trim box is grown so one of its sides exactly fills the box and
+    the other stays within it, with its aspect ratio unchanged."""
+    im = upscaled_for_print(_solid((1536, 1024)), dpi=300, trim_width_in=6.0, trim_height_in=9.0)
+    assert im.size == (1800, 1200), "width is the binding dimension (1800/1536 < 2700/1024); height follows it"
+    assert round(im.width / im.height, 4) == round(1536 / 1024, 4), "the aspect ratio is unchanged, not stretched"
+
+
+def test_upscaled_for_print_never_shrinks_a_generation_already_past_the_trim_box():
+    native = _solid((2400, 1600))  # already past the 1800x2700 box on its long edge
+    im = upscaled_for_print(native, dpi=300, trim_width_in=6.0, trim_height_in=9.0)
+    assert im.size == native.size, "a generation that already fills or exceeds the trim box is left exactly as painted"
+
+
+def test_upscaled_for_print_respects_a_configured_trim_size(tmp_path):
+    """The trim box is config, not a hardcoded constant: a square 8x8in trim upscales a square generation to
+    exactly 2400x2400 at 300 DPI."""
+    painter = _painter(tmp_path, trim_width_in=8.0, trim_height_in=8.0)
+    generated = FakeDriver((1024, 1024)).generate({"seed": 1}, "any")
+    result = painter.render_derivatives(generated, "square", tmp_path / "manuscript" / "images")
+    assert result["print"]["pixels"] == "2400x2400"
 
 
 def test_the_whole_tool_call_writes_both_files_into_the_manuscript(tmp_path):

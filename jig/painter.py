@@ -13,7 +13,11 @@ staging, and a whole book keeps one visual identity.
 
 Vision stays off here. There is no self-review loop and no quality heuristic: the returned bytes are what
 the model painted, offered for a human to curate before they ever go near a manuscript. ``render_derivatives``
-only re-sizes and re-encodes the same bytes - it never judges them.
+only re-sizes and re-encodes the same bytes - it never judges them. The one re-size that changes pixel count
+rather than just re-encoding is the print derivative's upscale to the configured trim size (see
+``upscaled_for_print``) - Bedrock's img2img output is capped around one megapixel, short of a real book page
+at 300 DPI, so the print copy is grown (never shrunk) to fill the page; the EPUB copy is always derived from
+the native, non-upscaled pixels.
 """
 
 from __future__ import annotations
@@ -101,6 +105,23 @@ def composite_reference_plate(images: list[bytes], *, strip_height: int = 512) -
     out = io.BytesIO()
     plate.save(out, "PNG", optimize=True)
     return out.getvalue()
+
+
+def upscaled_for_print(im: Image.Image, dpi: int, trim_width_in: float, trim_height_in: float) -> Image.Image:
+    """``im`` grown (Lanczos, never shrunk) to fill as much of the ``trim_width_in`` x ``trim_height_in`` box
+    at ``dpi`` as its own aspect ratio allows.
+
+    Bedrock's img2img output is capped around one megapixel regardless of what's asked for, well short of a
+    real book page at 300 DPI (a 6x9in trim is 1800x2700px) - without this, the print PNG still carries 300 DPI
+    metadata but at the model's native pixel count, so the page Leanpub renders ends up smaller than the trim,
+    not an error, just a quietly undersized image. The scale factor is capped at 1 (a generation already at or
+    above the trim box is left exactly as the model painted it) and the aspect ratio is preserved throughout,
+    so this only ever fills the box, never stretches or crops to it.
+    """
+    scale = min((trim_width_in * dpi) / im.width, (trim_height_in * dpi) / im.height)
+    if scale <= 1:
+        return im
+    return im.resize((round(im.width * scale), round(im.height * scale)), Image.LANCZOS)
 
 
 class BedrockDriver:
@@ -215,20 +236,23 @@ class Painter:
     def render_derivatives(self, generated: bytes, slug: str, images_dir: Path) -> dict[str, Any]:
         """Two files from one generation, under ``manuscript/images/`` as the Book Drafting Pipeline ADR expects.
 
-        ``{slug}_print.png`` is the full-resolution image written with 300 DPI metadata (Leanpub's print PDF
-        sizes it from that, no resampling); ``{slug}_epub.jpg`` is the same pixels scaled to a reader-safe
-        size and compressed for EPUB/MOBI. Both are derived from the single ``generated`` cache — nothing here
-        looks at them or judges them.
+        ``{slug}_print.png`` is the generation upscaled (Lanczos, never downscaled) to fill the configured
+        trim size and written with 300 DPI metadata, so Leanpub's print PDF renders it at the intended page
+        size; ``{slug}_epub.jpg`` is the *native* generation's pixels (not the upscaled print copy, so the
+        reader-facing derivative never carries upscale softening) scaled down to a reader-safe size and
+        compressed for EPUB/MOBI. Both are derived from the single ``generated`` cache — nothing here looks
+        at them or judges them.
         """
         images_dir = Path(images_dir)
         images_dir.mkdir(parents=True, exist_ok=True)
         im = Image.open(io.BytesIO(generated))
         im.load()
         dpi = self.config.print_dpi
-        width_in, height_in = round(im.width / dpi, 2), round(im.height / dpi, 2)
+        print_im = upscaled_for_print(im, dpi, self.config.trim_width_in, self.config.trim_height_in)
+        width_in, height_in = round(print_im.width / dpi, 2), round(print_im.height / dpi, 2)
 
         print_path = images_dir / f"{slug}_print.png"
-        im.save(print_path, "PNG", dpi=(dpi, dpi), optimize=True)
+        print_im.save(print_path, "PNG", dpi=(dpi, dpi), optimize=True)
 
         epub = im
         if im.width > self.config.epub_max_width:
@@ -241,7 +265,7 @@ class Painter:
         return {
             "generation": {"pixels": f"{im.width}x{im.height}", "print_size_in": f"{width_in} x {height_in}",
                            "dpi": dpi},
-            "print": {"path": print_path.name, "pixels": f"{im.width}x{im.height}", "dpi": dpi,
+            "print": {"path": print_path.name, "pixels": f"{print_im.width}x{print_im.height}", "dpi": dpi,
                       "size_bytes": print_path.stat().st_size},
             "epub": {"path": epub_path.name, "pixels": f"{epub.width}x{epub.height}",
                      "size_bytes": epub_path.stat().st_size},
