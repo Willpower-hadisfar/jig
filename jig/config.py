@@ -185,8 +185,14 @@ class PainterConfig:
     aspect_ratio: str = "16:9"
     # The output contract: one generation, two derivatives.
     output_format: str = "png"
-    # The print PNG is written with this DPI metadata, so Leanpub's print PDF sizes it without resampling.
+    # The print PNG is written with this DPI metadata, so Leanpub's print PDF sizes it directly.
     print_dpi: int = 300
+    # The print PNG's target physical size at print_dpi (Leanpub's common 6x9in trim by default). Bedrock's
+    # native img2img output is capped around one megapixel, well short of a 6x9in page at 300 DPI (1800x2700);
+    # the generation is upscaled (Lanczos, never downscaled) to fill this box before being written, so the
+    # print page is the intended physical size instead of whatever pixel count the model happened to return.
+    trim_width_in: float = 6.0
+    trim_height_in: float = 9.0
     # The EPUB variant is scaled so its longest side is at most this many pixels, then saved as a
     # compressed JPEG at epub_quality.
     epub_max_width: int = 1200
@@ -673,6 +679,8 @@ def _painter_config(values: dict[str, Any], base: Path) -> PainterConfig:
         raise ConfigError("[painter] steps and cfg_scale must both be more than 0")
     if cfg.enabled and not (0 < cfg.strength <= 1.0):
         raise ConfigError("[painter] strength must be between 0 (exclusive) and 1")
+    if cfg.enabled and not (cfg.trim_width_in > 0 and cfg.trim_height_in > 0):
+        raise ConfigError("[painter] trim_width_in and trim_height_in must both be more than 0")
     reference_dir = cfg.reference_dir
     if reference_dir:
         ref = Path(reference_dir)

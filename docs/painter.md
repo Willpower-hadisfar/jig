@@ -16,8 +16,10 @@ room, a cloud, an MCP handshake, a computer by candlelight.
 
 The painter produces **two derivatives from one generation**:
 
-- `{slug}_print.png` - the full-resolution painting written with 300 DPI metadata, so Leanpub's print PDF
-  sizes it without resampling.
+- `{slug}_print.png` - the painting upscaled (Lanczos, never downscaled) to fill the configured trim size
+  (`[painter] trim_width_in` / `trim_height_in`, 6x9in by default) at 300 DPI, so Leanpub's print PDF renders
+  it at the intended page size instead of whatever pixel count Bedrock's capped-around-one-megapixel img2img
+  output happened to return.
 - `{slug}_epub.jpg` - the same pixels scaled to a reader-safe width and compressed for EPUB/MOBI.
 
 Both land under `manuscript/images/` in the book repo - the same tree the existing rendered diagrams use -
